@@ -98,6 +98,15 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
 ### Temperature Management
 
 - Temperatures are stored as floats (°C)
+- The entity is **natively Celsius**: `temperature_unit` returns °C
+  regardless of the HA system unit, and HA core converts properties to
+  the display unit (and `set_temperature` input back to °C).  The
+  boundaries core does *not* convert — sensor states (via their
+  `unit_of_measurement`, falling back to the system unit), the real
+  device's `temperature` attribute, service calls to the real device, the
+  `current_temperature` override in `state_attributes`, and restored
+  attributes — go through `_to_celsius` / `_from_celsius`.  Returning the
+  system unit here once made °F installs plot raw °C setpoints as °F.
 - `TEMP_STEP`: 0.5 °C granularity for setpoint adjustments
 - `MIN_TEMP`/`MAX_TEMP`: Absolute bounds (10–35 °C)
 - `MIN_TEMP_DIFF`: 0.5 °C minimum difference between low and high setpoints
