@@ -2017,3 +2017,106 @@ class TestPerPresetSensors:
         problems = entity._detect_problems()
         assert f"preset_sensor_unavailable:{PRESET_SLEEP}" in problems
         assert "inside_sensor_unavailable" in problems
+
+
+# ---------------------------------------------------------------------------
+# Fahrenheit systems — entity is natively °C, HA owns display conversion
+# ---------------------------------------------------------------------------
+
+class TestFahrenheitSystem:
+    """On an imperial HA install, the entity stays °C internally.
+
+    HA core converts the entity's properties to °F for display, so the
+    wrapper must (a) declare °C as its native unit, (b) convert °F sensor
+    readings and real-device attributes into °C on the way in, and (c)
+    convert setpoints back to °F on the way out to the real device.
+    """
+
+    def _hass(self, **kwargs) -> MagicMock:
+        hass = _make_hass_mock(**kwargs)
+        hass.config.units.temperature_unit = "°F"
+        return hass
+
+    def test_native_unit_is_celsius(self):
+        entity = _make_entity(self._hass())
+        assert entity.temperature_unit == "°C"
+
+    def test_fahrenheit_inside_sensor_is_converted(self):
+        # 71.6 °F == 22 °C
+        entity = _make_entity(self._hass(inside_temp=71.6))
+        entity._sync_from_sensors()
+        assert entity._current_temperature == pytest.approx(22.0)
+
+    def test_sensor_unit_attribute_wins_over_system_unit(self):
+        """A sensor explicitly reporting °C is not re-converted."""
+        hass = self._hass()
+        sensor = MagicMock()
+        sensor.state = "22.0"
+        sensor.attributes = {"unit_of_measurement": "°C"}
+        hass.states.get = lambda eid: sensor if eid == INSIDE_SENSOR_ID else None
+        entity = _make_entity(hass)
+        entity._sync_from_sensors()
+        assert entity._current_temperature == pytest.approx(22.0)
+
+    def test_from_celsius_converts_to_system_unit(self):
+        entity = _make_entity(self._hass())
+        assert entity._from_celsius(22.0) == pytest.approx(71.6)
+
+    @pytest.mark.asyncio
+    async def test_setpoint_sent_to_real_device_in_fahrenheit(self):
+        """AUTO+HEAT on the Home preset sends low (21 °C) as 69.8 °F."""
+        hass = self._hass(real_climate_temp=None, inside_temp=68.0)
+        entity = _make_entity(hass)
+        entity._sync_from_sensors()  # 68 °F == 20 °C → HEAT
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_HOME
+        await entity._async_sync_real_climate()
+        data = hass.services.async_call.call_args[0][2]
+        assert data["hvac_mode"] == HVACMode.HEAT.value
+        assert data["temperature"] == pytest.approx(
+            DEFAULT_HOME_MIN * 9 / 5 + 32
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_resend_when_real_device_already_at_setpoint(self):
+        """Real device reporting the °F equivalent of our °C setpoint is in sync."""
+        hass = self._hass(
+            real_climate_state=HVACMode.HEAT.value,
+            real_climate_temp=70.0,  # display-rounded 21 °C (69.8 °F)
+            inside_temp=68.0,
+        )
+        entity = _make_entity(hass)
+        entity._sync_from_sensors()
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_HOME
+        await entity._async_sync_real_climate()
+        hass.services.async_call.assert_not_called()
+
+    def test_restore_converts_fahrenheit_attributes(self):
+        entity = _make_entity(self._hass())
+        last_state = MagicMock()
+        last_state.state = HVACMode.AUTO.value
+        last_state.attributes = {
+            "preset_mode": PRESET_NONE,
+            "target_temp_low": 68.0,   # 20 °C
+            "target_temp_high": 75.2,  # 24 °C
+        }
+        entity._restore_from_state(last_state)
+        assert entity._target_temp_low == pytest.approx(20.0)
+        assert entity._target_temp_high == pytest.approx(24.0)
+
+    def test_restore_drops_legacy_unconverted_values(self):
+        """Pre-fix °F installs stored raw °C numbers; don't read them as °F."""
+        entity = _make_entity(self._hass())
+        last_state = MagicMock()
+        last_state.state = HVACMode.HEAT.value
+        last_state.attributes = {
+            "preset_mode": PRESET_HOME,
+            "target_temp_low": None,
+            "target_temp_high": None,
+            "temperature": 23.5,  # really °C; as °F it would be -4.7 °C
+        }
+        entity._restore_from_state(last_state)
+        assert entity._target_temperature == pytest.approx(
+            (DEFAULT_HOME_MIN + DEFAULT_HOME_MAX) / 2.0
+        )

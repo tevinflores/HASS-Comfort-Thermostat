@@ -31,14 +31,17 @@ from homeassistant.components.climate.const import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_TEMPERATURE,
+    ATTR_UNIT_OF_MEASUREMENT,
     PRECISION_TENTHS,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
     CONF_AWAY_MAX,
@@ -223,8 +226,17 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
 
     @property
     def temperature_unit(self) -> str:
-        """Return the unit of measurement used by the platform."""
-        return self.hass.config.units.temperature_unit
+        """Return the native unit of every temperature this entity holds.
+
+        All internal state, constants, preset ranges and config-flow values
+        are °C, so the entity is natively Celsius regardless of the HA
+        system unit.  HA core converts our properties to the display unit
+        and converts incoming ``set_temperature`` values back to °C.  The
+        boundaries HA does *not* convert for us — sensor states, the real
+        device's attributes and service calls to it — go through
+        ``_to_celsius`` / ``_from_celsius``.
+        """
+        return UnitOfTemperature.CELSIUS
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
@@ -323,7 +335,8 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
         attrs = dict(super().state_attributes)
         if self._current_temperature is not None:
             attrs["current_temperature"] = round(
-                self._current_temperature, CURRENT_TEMP_DISPLAY_DECIMALS
+                self._from_celsius(self._current_temperature),
+                CURRENT_TEMP_DISPLAY_DECIMALS,
             )
         return attrs
 
@@ -433,12 +446,20 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
         self._preset_mode = (
             restored_preset if restored_preset in SUPPORTED_PRESETS else PRESET_HOME
         )
-        if attrs.get(ATTR_TARGET_TEMP_LOW) is not None:
-            self._target_temp_low = float(attrs[ATTR_TARGET_TEMP_LOW])
-        if attrs.get(ATTR_TARGET_TEMP_HIGH) is not None:
-            self._target_temp_high = float(attrs[ATTR_TARGET_TEMP_HIGH])
-        if attrs.get(ATTR_TEMPERATURE) is not None:
-            self._target_temperature = float(attrs[ATTR_TEMPERATURE])
+        # Saved temperatures are in the system (display) unit — HA converts
+        # our °C properties before writing the state.  Values that land
+        # outside [MIN_TEMP, MAX_TEMP] after conversion are dropped: they
+        # come from pre-fix Fahrenheit installs, which stored raw °C
+        # numbers under a °F label (21 "°F" would restore as -6 °C).
+        restored = self._restore_temp(attrs.get(ATTR_TARGET_TEMP_LOW))
+        if restored is not None:
+            self._target_temp_low = restored
+        restored = self._restore_temp(attrs.get(ATTR_TARGET_TEMP_HIGH))
+        if restored is not None:
+            self._target_temp_high = restored
+        restored = self._restore_temp(attrs.get(ATTR_TEMPERATURE))
+        if restored is not None:
+            self._target_temperature = restored
 
         # Restore the AUTO state machine: the sticky committed
         # direction and the last unit command.  Without this, every
@@ -460,6 +481,18 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
                 self._unit_command = HVACMode(last_cmd)
             except ValueError:
                 self._unit_command = None
+
+    def _restore_temp(self, value: Any) -> float | None:
+        """Convert a saved display-unit temperature to °C, or ``None``.
+
+        Guards on the value, not key presence — see ``_restore_from_state``.
+        """
+        if value is None:
+            return None
+        celsius = self._to_celsius(float(value))
+        if not MIN_TEMP <= celsius <= MAX_TEMP:
+            return None
+        return celsius
 
     def _all_inside_sensor_ids(self) -> list[str]:
         """Return every configured inside-sensor id (deduplicated, stable order).
@@ -545,7 +578,9 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
             None,
         ):
             try:
-                self._current_temperature = float(inside_state.state)
+                self._current_temperature = self._to_celsius(
+                    float(inside_state.state), self._sensor_unit(inside_state)
+                )
             except (ValueError, TypeError):
                 pass
 
@@ -557,7 +592,9 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
                 None,
             ):
                 try:
-                    self._outside_temperature = float(outside_state.state)
+                    self._outside_temperature = self._to_celsius(
+                        float(outside_state.state), self._sensor_unit(outside_state)
+                    )
                 except (ValueError, TypeError):
                     pass
 
@@ -603,6 +640,7 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
             return
         if math.isnan(new_temp):
             return
+        new_temp = self._to_celsius(new_temp, self._sensor_unit(state))
 
         old_temp = self._current_temperature
         self._current_temperature = new_temp
@@ -644,7 +682,9 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
         if math.isnan(new_temp):
             return
 
-        self._outside_temperature = new_temp
+        self._outside_temperature = self._to_celsius(
+            new_temp, self._sensor_unit(state)
+        )
 
         # In AUTO preset mode, outside temperature changes may refine the mode
         if (
@@ -657,6 +697,40 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
     # ------------------------------------------------------------------
     # Temperature / preset helpers
     # ------------------------------------------------------------------
+
+    def _system_unit(self) -> str:
+        """Return the HA system temperature unit (the display unit)."""
+        return self.hass.config.units.temperature_unit
+
+    def _to_celsius(self, value: float, unit: str | None = None) -> float:
+        """Convert ``value`` from ``unit`` (default: system unit) to °C."""
+        return TemperatureConverter.convert(
+            value, unit or self._system_unit(), UnitOfTemperature.CELSIUS
+        )
+
+    def _from_celsius(self, value: float) -> float:
+        """Convert a °C ``value`` to the system unit.
+
+        Used for anything HA core does not convert for us: the
+        current-temperature override in ``state_attributes`` and the
+        setpoints we send to the real device (climate services interpret
+        temperatures in the system unit).
+        """
+        return TemperatureConverter.convert(
+            value, UnitOfTemperature.CELSIUS, self._system_unit()
+        )
+
+    def _sensor_unit(self, state: State) -> str:
+        """Return a sensor's temperature unit, falling back to the system unit.
+
+        Temperature sensors normally report in the system unit, but users
+        can override a sensor's display unit, and template sensors may not
+        declare one at all.
+        """
+        unit = state.attributes.get(ATTR_UNIT_OF_MEASUREMENT)
+        if unit in TemperatureConverter.VALID_UNITS:
+            return unit
+        return self._system_unit()
 
     def _preset_midpoint(self) -> float:
         """Return the midpoint of the current comfort range."""
@@ -1020,20 +1094,25 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
             if low is not None and target_temp < low:
                 target_temp = float(math.ceil(low))
 
+        # The real device's attributes and its set_temperature service both
+        # use the system unit; everything above is °C.
         current_temp = real_state.attributes.get("temperature")
 
         # Tolerance must cover the full integer step so the next sensor
         # update doesn't trigger a spurious resend when the device is
         # already holding the exact value we sent.
         mode_changed = current_mode != real_mode.value
-        temp_changed = current_temp is None or abs(float(current_temp) - target_temp) >= 0.5
+        temp_changed = (
+            current_temp is None
+            or abs(self._to_celsius(float(current_temp)) - target_temp) >= 0.5
+        )
 
         if not (mode_changed or temp_changed):
             return
 
         service_data: dict[str, Any] = {
             "entity_id": self._real_climate_id,
-            "temperature": target_temp,
+            "temperature": self._from_celsius(target_temp),
             "hvac_mode": real_mode.value,
         }
         await self.hass.services.async_call(
@@ -1150,7 +1229,10 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
-                {"entity_id": self._real_climate_id, "temperature": temp},
+                {
+                    "entity_id": self._real_climate_id,
+                    "temperature": self._from_celsius(temp),
+                },
                 blocking=False,
             )
 
