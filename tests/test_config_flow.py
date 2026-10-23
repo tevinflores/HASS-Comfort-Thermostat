@@ -74,9 +74,17 @@ def _make_entry(data: dict, options: dict | None = None) -> MagicMock:
     return entry
 
 
-async def _build_options_schema(entry: MagicMock) -> vol.Schema:
-    """Invoke async_step_init's form path and return the data_schema."""
+def _make_options_flow(entry: MagicMock, unit: str = "°C") -> SmartClimateOptionsFlow:
+    """Build an options flow on a hass mock using the given system unit."""
     flow = SmartClimateOptionsFlow(entry)
+    flow.hass = MagicMock()
+    flow.hass.config.units.temperature_unit = unit
+    return flow
+
+
+async def _build_options_schema(entry: MagicMock, unit: str = "°C") -> vol.Schema:
+    """Invoke async_step_init's form path and return the data_schema."""
+    flow = _make_options_flow(entry, unit)
     captured: dict = {}
 
     def _capture(*, step_id, data_schema, **_):
@@ -238,3 +246,70 @@ class TestOptionsFlowSensors:
         sensor_idx = keys.index(CONF_INSIDE_SENSOR)
         temp_idx = keys.index(CONF_HOME_MIN)
         assert sensor_idx < temp_idx
+
+
+# ---------------------------------------------------------------------------
+# Options flow — preset temperatures follow the HA system unit
+# ---------------------------------------------------------------------------
+
+class TestOptionsFlowFahrenheit:
+    """Preset temps are stored in °C but shown / entered in the system unit."""
+
+    def _entry(self, options: dict | None = None) -> MagicMock:
+        return _make_entry(
+            data={
+                CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
+                CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            },
+            options=options,
+        )
+
+    @pytest.mark.asyncio
+    async def test_defaults_shown_in_fahrenheit(self):
+        entry = self._entry(options={CONF_HOME_MIN: 20.0, CONF_HOME_MAX: 24.0})
+        defaults = _schema_defaults(await _build_options_schema(entry, "°F"))
+        assert defaults[CONF_HOME_MIN] == 68.0
+        assert defaults[CONF_HOME_MAX] == 75.2
+
+    @pytest.mark.asyncio
+    async def test_selector_uses_fahrenheit_unit_and_bounds(self):
+        schema = await _build_options_schema(self._entry(), "°F")
+        selector = next(
+            v for k, v in schema.schema.items() if str(k) == CONF_HOME_MIN
+        )
+        assert selector.config["unit_of_measurement"] == "°F"
+        assert selector.config["min"] == 50.0  # MIN_TEMP 10 °C
+        assert selector.config["max"] == 95.0  # MAX_TEMP 35 °C
+
+    @pytest.mark.asyncio
+    async def test_submitted_fahrenheit_stored_as_celsius(self):
+        flow = _make_options_flow(self._entry(), "°F")
+        created: dict = {}
+
+        def _capture(*, title, data):
+            created.update(data)
+            return {"type": "create_entry"}
+
+        flow.async_create_entry = _capture  # type: ignore[assignment]
+        await flow.async_step_init(
+            {
+                CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+                CONF_HOME_MIN: 68.0,
+                CONF_HOME_MAX: 75.2,
+                CONF_SLEEP_MIN: 66.2,
+                CONF_SLEEP_MAX: 71.6,
+                CONF_AWAY_MIN: 64.4,
+                CONF_AWAY_MAX: 78.8,
+            }
+        )
+        assert created[CONF_INSIDE_SENSOR] == INSIDE_SENSOR_ID
+        assert created[CONF_HOME_MIN] == 20.0
+        assert created[CONF_HOME_MAX] == 24.0
+        assert created[CONF_SLEEP_MIN] == 19.0
+        assert created[CONF_AWAY_MAX] == 26.0
+
+    @pytest.mark.asyncio
+    async def test_celsius_system_unchanged(self):
+        entry = self._entry(options={CONF_HOME_MIN: 20.5})
+        defaults = _schema_defaults(await _build_options_schema(entry, "°C"))
+        assert defaults[CONF_HOME_MIN] == 20.5

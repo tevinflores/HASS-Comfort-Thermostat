@@ -6,6 +6,7 @@ import voluptuous as vol
 from homeassistant.components.climate import DOMAIN as CLIMATE_DOMAIN
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
     EntitySelector,
@@ -17,6 +18,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
     CONF_AWAY_MAX,
@@ -42,15 +44,41 @@ from .const import (
     TEMP_STEP,
 )
 
-_TEMP_SELECTOR = NumberSelector(
-    NumberSelectorConfig(
-        min=MIN_TEMP,
-        max=MAX_TEMP,
-        step=TEMP_STEP,
-        unit_of_measurement="°C",
-        mode=NumberSelectorMode.BOX,
-    )
+_PRESET_TEMP_KEYS = (
+    CONF_HOME_MIN,
+    CONF_HOME_MAX,
+    CONF_SLEEP_MIN,
+    CONF_SLEEP_MAX,
+    CONF_AWAY_MIN,
+    CONF_AWAY_MAX,
 )
+
+
+def _temp_selector(unit: str) -> NumberSelector:
+    """Return a preset-temperature selector bounded in the display ``unit``."""
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=_to_display(MIN_TEMP, unit),
+            max=_to_display(MAX_TEMP, unit),
+            step=TEMP_STEP,
+            unit_of_measurement=unit,
+            mode=NumberSelectorMode.BOX,
+        )
+    )
+
+
+def _to_display(celsius: float, unit: str) -> float:
+    """Convert a stored °C preset value to the display unit for the form."""
+    return round(
+        TemperatureConverter.convert(celsius, UnitOfTemperature.CELSIUS, unit), 1
+    )
+
+
+def _from_display(value: float, unit: str) -> float:
+    """Convert a form value in the display unit back to °C for storage."""
+    return round(
+        TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS), 2
+    )
 
 
 class SmartClimateConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -119,9 +147,18 @@ class SmartClimateOptionsFlow(OptionsFlow):
         Pre-populates every field from the union of ``entry.data`` (initial
         setup values) and ``entry.options`` (previous edits via this flow)
         so the form always shows the currently effective configuration.
+
+        Preset temperatures are stored in °C (the entity's native unit) but
+        shown and entered in the HA system unit, converted at this boundary.
         """
+        unit = self.hass.config.units.temperature_unit
+
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            data = dict(user_input)
+            for key in _PRESET_TEMP_KEYS:
+                if key in data:
+                    data[key] = _from_display(data[key], unit)
+            return self.async_create_entry(title="", data=data)
 
         current = {**self._config_entry.data, **self._config_entry.options}
 
@@ -148,31 +185,21 @@ class SmartClimateOptionsFlow(OptionsFlow):
         sensor_schema.update(_optional_sensor(CONF_INSIDE_SENSOR_AWAY))
         sensor_schema.update(_optional_sensor(CONF_OUTSIDE_SENSOR))
 
+        defaults = {
+            CONF_HOME_MIN: DEFAULT_HOME_MIN,
+            CONF_HOME_MAX: DEFAULT_HOME_MAX,
+            CONF_SLEEP_MIN: DEFAULT_SLEEP_MIN,
+            CONF_SLEEP_MAX: DEFAULT_SLEEP_MAX,
+            CONF_AWAY_MIN: DEFAULT_AWAY_MIN,
+            CONF_AWAY_MAX: DEFAULT_AWAY_MAX,
+        }
+        temp_selector = _temp_selector(unit)
         preset_schema = {
             vol.Required(
-                CONF_HOME_MIN,
-                default=current.get(CONF_HOME_MIN, DEFAULT_HOME_MIN),
-            ): _TEMP_SELECTOR,
-            vol.Required(
-                CONF_HOME_MAX,
-                default=current.get(CONF_HOME_MAX, DEFAULT_HOME_MAX),
-            ): _TEMP_SELECTOR,
-            vol.Required(
-                CONF_SLEEP_MIN,
-                default=current.get(CONF_SLEEP_MIN, DEFAULT_SLEEP_MIN),
-            ): _TEMP_SELECTOR,
-            vol.Required(
-                CONF_SLEEP_MAX,
-                default=current.get(CONF_SLEEP_MAX, DEFAULT_SLEEP_MAX),
-            ): _TEMP_SELECTOR,
-            vol.Required(
-                CONF_AWAY_MIN,
-                default=current.get(CONF_AWAY_MIN, DEFAULT_AWAY_MIN),
-            ): _TEMP_SELECTOR,
-            vol.Required(
-                CONF_AWAY_MAX,
-                default=current.get(CONF_AWAY_MAX, DEFAULT_AWAY_MAX),
-            ): _TEMP_SELECTOR,
+                key,
+                default=_to_display(current.get(key, defaults[key]), unit),
+            ): temp_selector
+            for key in _PRESET_TEMP_KEYS
         }
 
         schema = vol.Schema({**sensor_schema, **preset_schema})

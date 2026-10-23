@@ -31,12 +31,12 @@
           "inside_sensor_sleep": "Inside Temperature Sensor – Sleep (optional)",
           "inside_sensor_away": "Inside Temperature Sensor – Away (optional)",
           "outside_sensor": "Outside Temperature Sensor (optional)",
-          "home_min": "Home – Low Setpoint (°C)",
-          "home_max": "Home – High Setpoint (°C)",
-          "sleep_min": "Sleep – Low Setpoint (°C)",
-          "sleep_max": "Sleep – High Setpoint (°C)",
-          "away_min": "Away – Low Setpoint (°C)",
-          "away_max": "Away – High Setpoint (°C)"
+          "home_min": "Home – Low Setpoint",
+          "home_max": "Home – High Setpoint",
+          "sleep_min": "Sleep – Low Setpoint",
+          "sleep_max": "Sleep – High Setpoint",
+          "away_min": "Away – Low Setpoint",
+          "away_max": "Away – High Setpoint"
         }
       }
     }
