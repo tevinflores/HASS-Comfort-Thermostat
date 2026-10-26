@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v6.0.2...v1.0.0) (2026-10-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* the integration domain changed from smart_climate to comfort_thermostat. Existing installs must add Comfort Thermostat as a new integration; settings and entity ids do not carry over.
+
+### Features
+
+* rename to Comfort Thermostat ([a6d9108](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/a6d9108149a999bada0c0fdefea1aaf8e6f9b99f))
+
+
+### Bug Fixes
+
+* **climate:** enhance Fahrenheit support with proper temperature conversion and display ([40c2fa6](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/40c2fa603fcb06a1be268d29691f13ae2edd6e84))
+* **climate:** ensure proper temperature conversion for Fahrenheit systems ([fe6bfac](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/fe6bfac947a9c4150143d61fa457a6ab46caa8d9))
+* **climate:** improve Fahrenheit support by ensuring proper temperature conversions ([7db2040](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/7db2040bf6470731e5a6e9d02746932f0dfd63c3))
+
 ## [6.0.2](https://github.com/HomeOps/HASS-Smart-Climate/compare/v6.0.1...v6.0.2) (2026-08-06)
 
 
