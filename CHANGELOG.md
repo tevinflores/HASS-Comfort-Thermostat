@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v6.0.2...v1.0.0) (2026-10-26)
+## [1.0.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/45cc397a5cb5d4b5ccb5d782a525c30e2c99bde5...v1.0.0) (2026-10-26)
 
 
 ### ⚠ BREAKING CHANGES
