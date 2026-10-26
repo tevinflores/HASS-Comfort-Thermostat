@@ -1,4 +1,4 @@
-"""Config flow for Smart Climate integration."""
+"""Config flow for Comfort Thermostat integration."""
 from __future__ import annotations
 
 import voluptuous as vol
@@ -81,8 +81,8 @@ def _from_display(value: float, unit: str) -> float:
     )
 
 
-class SmartClimateConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the initial config flow for Smart Climate."""
+class ComfortThermostatConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the initial config flow for Comfort Thermostat."""
 
     VERSION = 1
 
@@ -98,7 +98,7 @@ class SmartClimateConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required("name", default="Smart Climate"): TextSelector(
+                vol.Required("name", default="Comfort Thermostat"): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT)
                 ),
                 vol.Required(CONF_REAL_CLIMATE): EntitySelector(
@@ -127,13 +127,13 @@ class SmartClimateConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> SmartClimateOptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> ComfortThermostatOptionsFlow:
         """Return the options flow handler."""
-        return SmartClimateOptionsFlow(config_entry)
+        return ComfortThermostatOptionsFlow(config_entry)
 
 
-class SmartClimateOptionsFlow(OptionsFlow):
-    """Handle options (preset temperatures) for Smart Climate."""
+class ComfortThermostatOptionsFlow(OptionsFlow):
+    """Handle options (preset temperatures) for Comfort Thermostat."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""

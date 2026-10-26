@@ -1,15 +1,15 @@
-"""Tests for the Smart Climate config / options flow."""
+"""Tests for the Comfort Thermostat config / options flow."""
 from __future__ import annotations
 
 import pytest
 import voluptuous as vol
 from unittest.mock import MagicMock
 
-from custom_components.smart_climate.config_flow import (
-    SmartClimateConfigFlow,
-    SmartClimateOptionsFlow,
+from custom_components.comfort_thermostat.config_flow import (
+    ComfortThermostatConfigFlow,
+    ComfortThermostatOptionsFlow,
 )
-from custom_components.smart_climate.const import (
+from custom_components.comfort_thermostat.const import (
     CONF_AWAY_MAX,
     CONF_AWAY_MIN,
     CONF_HOME_MAX,
@@ -74,9 +74,9 @@ def _make_entry(data: dict, options: dict | None = None) -> MagicMock:
     return entry
 
 
-def _make_options_flow(entry: MagicMock, unit: str = "°C") -> SmartClimateOptionsFlow:
+def _make_options_flow(entry: MagicMock, unit: str = "°C") -> ComfortThermostatOptionsFlow:
     """Build an options flow on a hass mock using the given system unit."""
-    flow = SmartClimateOptionsFlow(entry)
+    flow = ComfortThermostatOptionsFlow(entry)
     flow.hass = MagicMock()
     flow.hass.config.units.temperature_unit = unit
     return flow
@@ -98,7 +98,7 @@ async def _build_options_schema(entry: MagicMock, unit: str = "°C") -> vol.Sche
 
 async def _build_user_schema() -> vol.Schema:
     """Invoke async_step_user's form path and return the data_schema."""
-    flow = SmartClimateConfigFlow()
+    flow = ComfortThermostatConfigFlow()
     flow.hass = MagicMock()
     captured: dict = {}
 

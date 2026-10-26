@@ -1,6 +1,6 @@
-"""Constants for the Smart Climate integration."""
+"""Constants for the Comfort Thermostat integration."""
 
-DOMAIN = "smart_climate"
+DOMAIN = "comfort_thermostat"
 
 # Configuration keys
 CONF_REAL_CLIMATE = "real_climate"

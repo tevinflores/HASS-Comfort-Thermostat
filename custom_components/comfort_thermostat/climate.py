@@ -1,4 +1,4 @@
-"""Smart Climate - EcoBee-like thermostat platform for Home Assistant.
+"""Comfort Thermostat - EcoBee-like thermostat platform for Home Assistant.
 
 Wraps a physical climate device and adds:
 - Comfort presets (Home, Sleep, Away) with configurable temperature ranges
@@ -85,13 +85,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Smart Climate from a config entry."""
+    """Set up Comfort Thermostat from a config entry."""
     config = {**entry.data, **entry.options}
-    entity = SmartClimateEntity(hass, entry.entry_id, entry.title, config)
+    entity = ComfortThermostatEntity(hass, entry.entry_id, entry.title, config)
     async_add_entities([entity])
 
 
-class SmartClimateEntity(ClimateEntity, RestoreEntity):
+class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     """EcoBee-like smart thermostat that wraps a real climate entity.
 
     In AUTO mode the entity manages a *temperature range* (low/high setpoints)
@@ -606,7 +606,7 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
     def _on_real_climate_update(self) -> None:
         """Mirror the real device's hvac_action for UI display.
 
-        Smart climate is the authoritative source of truth for mode, preset,
+        Comfort Thermostat is the authoritative source of truth for mode, preset,
         and setpoints – see the master/slave note at the top of this class.
         Real-device state-change events are used only to surface the current
         action (heating / cooling / idle / off) in the frontend.
@@ -891,7 +891,7 @@ class SmartClimateEntity(ClimateEntity, RestoreEntity):
         threshold, ~22.5 for [21, 23]).  Keeping deliberate-OFF on top
         of the corrected setpoint just added cycling overhead — empirical
         2026-05-02 comparison showed manual constant-cool used **~50×
-        less power** than smart_climate's deliberate-OFF cycling on a
+        less power** than comfort_thermostat's deliberate-OFF cycling on a
         warm afternoon (1.17 kW avg vs 23 W avg).  Removed in v5.0.0.
         """
         if self._hvac_mode == HVACMode.OFF:

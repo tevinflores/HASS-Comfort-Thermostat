@@ -1,4 +1,4 @@
-"""Smart Climate integration for Home Assistant.
+"""Comfort Thermostat integration for Home Assistant.
 
 Provides an EcoBee-like smart thermostat that wraps a physical climate device,
 adding comfort presets with temperature ranges, and automatic heat/cool switching
@@ -19,7 +19,7 @@ PLATFORMS = ["climate"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Smart Climate from a config entry."""
+    """Set up Comfort Thermostat from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

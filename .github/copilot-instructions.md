@@ -21,7 +21,7 @@ No manual labels are required for the release process.
 
 1. Every push to `main` triggers the **release-please** workflow.
 2. release-please opens (or updates) a **Release PR** that:
-   - Bumps the version in `custom_components/smart_climate/manifest.json`.
+   - Bumps the version in `custom_components/comfort_thermostat/manifest.json`.
    - Updates `CHANGELOG.md`.
 3. A maintainer merges the Release PR.
 4. release-please creates the GitHub Release and git tag pointing at the commit

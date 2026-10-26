@@ -1,6 +1,6 @@
-# Smart Climate — AUTO mode state machine
+# Comfort Thermostat — AUTO mode state machine
 
-Reference for the AUTO-mode behavior of `climate.smart_climate` as of
+Reference for the AUTO-mode behavior of `climate.comfort_thermostat` as of
 **v3.1.0**.  Two layers compose:
 
 1. **Direction commitment** (`_auto_mode`) — sticky HEAT or COOL choice
@@ -189,7 +189,7 @@ key off `length > 0` for notifications.
 
 ## Constants
 
-All thresholds live in [`const.py`](../custom_components/smart_climate/const.py):
+All thresholds live in [`const.py`](../custom_components/comfort_thermostat/const.py):
 
 | Constant | Default | Purpose |
 |---|---|---|

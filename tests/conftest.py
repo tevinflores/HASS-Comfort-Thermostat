@@ -1,4 +1,4 @@
-"""Pytest configuration and shared fixtures for Smart Climate tests."""
+"""Pytest configuration and shared fixtures for Comfort Thermostat tests."""
 from __future__ import annotations
 
 import pytest
@@ -8,7 +8,7 @@ from homeassistant.components.climate import HVACMode, HVACAction
 from homeassistant.components.climate.const import PRESET_HOME, PRESET_SLEEP, PRESET_AWAY, PRESET_NONE
 from homeassistant.core import HomeAssistant
 
-from custom_components.smart_climate.const import (
+from custom_components.comfort_thermostat.const import (
     CONF_REAL_CLIMATE,
     CONF_INSIDE_SENSOR,
     CONF_OUTSIDE_SENSOR,

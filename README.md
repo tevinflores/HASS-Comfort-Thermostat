@@ -1,4 +1,4 @@
-# HASS-Smart-Climate
+# HASS-Comfort-Thermostat
 
 A HACS-compatible custom component for Home Assistant that turns any climate device into an **EcoBee-like smart thermostat** with comfort presets and automatic heat/cool switching.
 
@@ -18,13 +18,13 @@ A HACS-compatible custom component for Home Assistant that turns any climate dev
 
 1. Open **HACS → Integrations**.
 2. Click the three-dot menu (⋮) → **Custom repositories**.
-3. Add `https://github.com/HomeOps/HASS-Smart-Climate` with category **Integration**.
-4. Find **Smart Climate** in the HACS store and click **Download**.
+3. Add `https://github.com/tevinflores/HASS-Comfort-Thermostat` with category **Integration**.
+4. Find **Comfort Thermostat** in the HACS store and click **Download**.
 5. Restart Home Assistant.
 
 ### Manual
 
-1. Copy the `custom_components/smart_climate/` folder into your Home Assistant `config/custom_components/` directory.
+1. Copy the `custom_components/comfort_thermostat/` folder into your Home Assistant `config/custom_components/` directory.
 2. Restart Home Assistant.
 
 ## Configuration
@@ -32,7 +32,7 @@ A HACS-compatible custom component for Home Assistant that turns any climate dev
 ### Add the integration
 
 1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **Smart Climate**.
+2. Search for **Comfort Thermostat**.
 3. Fill in the form:
    | Field | Required | Description |
    |-------|----------|-------------|
@@ -83,8 +83,8 @@ unavailable / stale, real-device unavailable, sustained out-of-band in AUTO,
 COOL short-cycling.  Use in templates / dashboards:
 
 ```jinja
-{% if state_attr('climate.smart_climate', 'problems') %}
-  ⚠ {{ state_attr('climate.smart_climate', 'problems') | join('; ') }}
+{% if state_attr('climate.comfort_thermostat', 'problems') %}
+  ⚠ {{ state_attr('climate.comfort_thermostat', 'problems') | join('; ') }}
 {% endif %}
 ```
 
@@ -100,9 +100,15 @@ remote or another automation) by more than 0.5 °C, the smart thermostat
 automatically switches to **Manual** mode to avoid conflicting with the
 external change.
 
+## Credits
+
+Comfort Thermostat is a fork of [HASS-Smart-Climate](https://github.com/HomeOps/HASS-Smart-Climate), created by Oscar Calvo ([@ocalvo](https://github.com/ocalvo)). The AUTO-mode design, the Midea unit research and every release up to 6.0.2 are his work. Thank you!
+
+The upstream integration's domain was `smart_climate`; this fork uses `comfort_thermostat`, so the two can be installed side by side. Moving from Smart Climate means adding Comfort Thermostat as a new integration (settings don't carry over).
+
 ## Inspiration
 
-This integration is inspired by the [ESPHome-Midea-XYE `smart_climate` component](https://github.com/HomeOps/ESPHome-Midea-XYE), which implements the same EcoBee-like logic as an ESPHome external component for ESP8266/ESP32 devices.
+The original integration is inspired by the [ESPHome-Midea-XYE `smart_climate` component](https://github.com/HomeOps/ESPHome-Midea-XYE), which implements the same EcoBee-like logic as an ESPHome external component for ESP8266/ESP32 devices.
 
 ## License
 

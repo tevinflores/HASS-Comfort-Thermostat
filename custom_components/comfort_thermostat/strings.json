@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Smart Climate Setup",
+        "title": "Comfort Thermostat Setup",
         "description": "Configure your EcoBee-like smart thermostat.",
         "data": {
           "name": "Thermostat Name",
@@ -18,13 +18,13 @@
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Smart Climate is already configured"
+      "already_configured": "Comfort Thermostat is already configured"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Smart Climate Options",
+        "title": "Comfort Thermostat Options",
         "description": "Configure the per-preset temperature sensors and comfort temperature ranges.",
         "data": {
           "inside_sensor": "Inside Temperature Sensor (Home / default)",

@@ -1,4 +1,4 @@
-"""Tests for the Smart Climate entity."""
+"""Tests for the Comfort Thermostat entity."""
 from __future__ import annotations
 
 import datetime
@@ -20,8 +20,8 @@ from homeassistant.components.climate.const import (
 from homeassistant.const import PRECISION_TENTHS
 from homeassistant.core import HomeAssistant
 
-from custom_components.smart_climate.climate import SmartClimateEntity, SUPPORTED_PRESETS
-from custom_components.smart_climate.const import (
+from custom_components.comfort_thermostat.climate import ComfortThermostatEntity, SUPPORTED_PRESETS
+from custom_components.comfort_thermostat.const import (
     CONF_REAL_CLIMATE,
     CONF_INSIDE_SENSOR,
     CONF_INSIDE_SENSOR_AWAY,
@@ -67,14 +67,14 @@ OUTSIDE_SENSOR_ID = "sensor.outside_temp"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_entity(hass_mock, config=None) -> SmartClimateEntity:
-    """Create a SmartClimateEntity with a mocked hass instance."""
+def _make_entity(hass_mock, config=None) -> ComfortThermostatEntity:
+    """Create a ComfortThermostatEntity with a mocked hass instance."""
     if config is None:
         config = {
             CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
             CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
         }
-    entity = SmartClimateEntity(hass_mock, "test_entry_id", "Smart Thermostat", config)
+    entity = ComfortThermostatEntity(hass_mock, "test_entry_id", "Smart Thermostat", config)
     return entity
 
 
@@ -874,7 +874,7 @@ class TestStateCallbacks:
     def test_real_setpoint_divergence_does_not_clear_preset(self):
         """Master/slave: real-device state events never mutate preset_mode.
 
-        Smart climate is the sole writer of the real device's setpoint, so any
+        Comfort Thermostat is the sole writer of the real device's setpoint, so any
         divergence reported back (in any hvac state, by any magnitude) must be
         ignored by _on_real_climate_update.  This covers the whole class of
         feedback-loop bugs where smart's own OFF / HEAT / COOL writes were
@@ -1101,7 +1101,7 @@ class TestSyncedSetpoints:
 
     @pytest.mark.asyncio
     async def test_sync_off_when_user_commanded_off(self):
-        """When smart climate's own hvac_mode is OFF, the real device is
+        """When comfort thermostat's own hvac_mode is OFF, the real device is
         commanded OFF (path covers the race between sensor-callback
         dispatch and a user-driven mode switch to OFF)."""
         hass = _make_hass_mock(
@@ -1446,7 +1446,7 @@ class TestStateRestoration:
         inside_temp: float = 20.0,
         real_climate_state: str = HVACMode.OFF.value,
         real_climate_temp: float | None = None,
-    ) -> tuple[SmartClimateEntity, MagicMock]:
+    ) -> tuple[ComfortThermostatEntity, MagicMock]:
         """Create an entity and run async_added_to_hass with the given last_state."""
         hass = _make_hass_mock(
             real_climate_state=real_climate_state,
@@ -1457,13 +1457,13 @@ class TestStateRestoration:
 
         # Mock the RestoreEntity and lifecycle methods
         with patch.object(
-            SmartClimateEntity, "async_get_last_state", return_value=last_state
+            ComfortThermostatEntity, "async_get_last_state", return_value=last_state
         ), patch.object(
-            SmartClimateEntity, "async_on_remove"
+            ComfortThermostatEntity, "async_on_remove"
         ), patch(
-            "custom_components.smart_climate.climate.async_track_state_change_event"
+            "custom_components.comfort_thermostat.climate.async_track_state_change_event"
         ), patch.object(
-            SmartClimateEntity, "async_write_ha_state"
+            ComfortThermostatEntity, "async_write_ha_state"
         ):
             await entity.async_added_to_hass()
 
@@ -1623,7 +1623,7 @@ class TestStateRestoration:
     async def test_preset_survives_mismatched_real_device_temp(self):
         """Preset is restored verbatim regardless of real device's reported setpoint.
 
-        Smart climate owns preset_mode; real-device setpoint never feeds back
+        Comfort Thermostat owns preset_mode; real-device setpoint never feeds back
         into it.  This test pins that contract end-to-end through startup:
         even if the wrapped device reports a wildly divergent temperature
         (e.g. stale value from before the restart), the restored preset is

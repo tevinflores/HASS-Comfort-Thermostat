@@ -1,1 +1,1 @@
-"""Tests for HASS-Smart-Climate."""
+"""Tests for HASS-Comfort-Thermostat."""

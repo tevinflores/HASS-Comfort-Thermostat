@@ -1,12 +1,13 @@
-# HASS-Smart-Climate Development Guide
+# HASS-Comfort-Thermostat Development Guide
 
 ## Project Overview
 
-**HASS-Smart-Climate** is a HACS-compatible Home Assistant custom component that turns any climate device into an EcoBee-like smart thermostat with comfort presets and automatic heat/cool switching.
+**HASS-Comfort-Thermostat** is a HACS-compatible Home Assistant custom component that turns any climate device into an EcoBee-like smart thermostat with comfort presets and automatic heat/cool switching.
 
 - **Language**: Python 3.11+
 - **Framework**: Home Assistant custom component
-- **Owner**: @ocalvo (Oscar Calvo)
+- **Owner**: @tevinflores (Tevin Flores)
+- **Origin**: hard fork of [HomeOps/HASS-Smart-Climate](https://github.com/HomeOps/HASS-Smart-Climate) by @ocalvo (Oscar Calvo), at v6.0.2
 - **Current Version**: see `manifest.json` — managed by release-please, never hand-edited (and never mirrored here, or it drifts)
 - **Releases**: Published to GitHub Releases automatically via release-please workflow
 
@@ -53,26 +54,26 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
 
 ### Main Component Files
 
-- **`custom_components/smart_climate/climate.py`**: Core thermostat logic
-  - `SmartClimateEntity` class – main entity wrapping a real climate device
+- **`custom_components/comfort_thermostat/climate.py`**: Core thermostat logic
+  - `ComfortThermostatEntity` class – main entity wrapping a real climate device
   - Auto heat/cool switching logic
   - Preset and state management
   
-- **`custom_components/smart_climate/__init__.py`**: Component setup
+- **`custom_components/comfort_thermostat/__init__.py`**: Component setup
   - Entry point for Home Assistant
   
-- **`custom_components/smart_climate/config_flow.py`**: Configuration UI
+- **`custom_components/comfort_thermostat/config_flow.py`**: Configuration UI
   - User setup flow
   - Options flow for preset temperatures **and** the per-preset inside
     sensors (since #81) — so existing installs can wire up Sleep / Away
     zones without deleting and re-adding the integration
   
-- **`custom_components/smart_climate/const.py`**: Constants and defaults
+- **`custom_components/comfort_thermostat/const.py`**: Constants and defaults
   - Preset temperature ranges
   - Temperature limits and deadbands
   - Configuration keys
 
-- **`custom_components/smart_climate/strings.json`**: Localization strings
+- **`custom_components/comfort_thermostat/strings.json`**: Localization strings
   - UI labels and descriptions
   - Error messages
 
@@ -120,7 +121,7 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
 **v5.0.0 retraction:** the deliberate-OFF design (v3.0.x) and in-band
 COOL hysteresis (v3.0.1, v4.0.x) were removed.  Empirical 2026-05-02
 data showed manual constant-cool with `setpoint=high-1` used **~50×
-less power** than smart_climate's deliberate-OFF cycling on a warm
+less power** than comfort_thermostat's deliberate-OFF cycling on a warm
 afternoon (1.17 kW avg vs. 23 W avg).  The unit's own ±0.5 °C
 hysteresis around the asymmetric setpoint already prevents the
 original min-frequency-floor symptom that motivated deliberate-OFF;
@@ -316,7 +317,7 @@ rm -rf .pytest_cache __pycache__ .coverage
   "Restored attributes are present-but-`None` outside AUTO". Critical invariant.
 - Temperature calculations must maintain numeric precision (use TEMP_STEP consistently)
 - The real climate device's setpoint in AUTO is asymmetric: `low` for HEAT, `high - 1` for COOL (corrected from v4.0.0's `high` after live observation showed unit overshoot is positive-only, not symmetric). Critical invariant.
-- Master/slave (since #43): smart climate is the sole writer of the real device's
+- Master/slave (since #43): comfort thermostat is the sole writer of the real device's
   hvac_mode and setpoint; real-device state events are only mirrored as
   `hvac_action` for UI and never feed back into preset/setpoint state
 - All preset temperature ranges must respect MIN_TEMP_DIFF constraint
@@ -350,7 +351,7 @@ sensor.downstairs_avg_temp = mean(living, dining, kitchen, den)
 sensor.whole_home_temperature = (existing) — fallback
 ```
 
-Smart climate then picks which helper to read per preset.  Three
+Comfort Thermostat then picks which helper to read per preset.  Three
 config keys, settable at setup and editable afterwards via the
 options flow (since #81):
 
@@ -394,16 +395,16 @@ AND the sensor used when the user is in manual mode (PRESET_NONE)".
 `ESPHome-Midea-XYE` was previously configured to push a fixed
 sensor (`sensor.whole_home_temperature`) into the unit via Follow
 Me.  After this feature, the right thing for it to push is
-whatever `climate.smart_climate.current_temperature` resolves to —
+whatever `climate.comfort_thermostat.current_temperature` resolves to —
 **that attribute is the canonical "what the system should track
 right now"** and already reflects the active preset's sensor.
 
 Two options on the ESPHome side:
 
 - **(simpler)** Re-point the ESPHome `homeassistant.sensor`
-  reference at `climate.smart_climate` `current_temperature`
+  reference at `climate.comfort_thermostat` `current_temperature`
   attribute.  Single source of truth.
-- **(alternative)** Have smart_climate fire a service call /
+- **(alternative)** Have comfort_thermostat fire a service call /
   notification when the active sensor changes, and ESPHome
   re-binds.  More code, no real benefit if option 1 works.
 
@@ -439,7 +440,7 @@ Option 1 is the contract.
 
 ### The COOL minimum-frequency floor
 
-With smart_climate in AUTO, `current = 21.5 °C`, `target = 25 °C`
+With comfort_thermostat in AUTO, `current = 21.5 °C`, `target = 25 °C`
 (home preset, low/high = 21/23 → midpoint 22), **COOL committed**:
 
 - Midea unit kept compressor at minimum frequency continuously.
@@ -526,8 +527,8 @@ templates: e.g.
 
 ```yaml
 - alert: |
-    {% if state_attr('climate.smart_climate', 'problems') | length > 0 %}
-    Smart Climate: {{ state_attr('climate.smart_climate', 'problems') | join(', ') }}
+    {% if state_attr('climate.comfort_thermostat', 'problems') | length > 0 %}
+    Comfort Thermostat: {{ state_attr('climate.comfort_thermostat', 'problems') | join(', ') }}
     {% endif %}
 ```
 
@@ -603,12 +604,12 @@ fraction) and FAN_ONLY (during the fan-on fraction).
 
 ## Deferred (v4+) — Whole-home ancillary controls
 
-The user has additional whole-home equipment that the smart climate
+The user has additional whole-home equipment that the comfort thermostat
 *could* coordinate with eventually. Capturing now so they're not
 forgotten; **out of scope for the next release**:
 
 - **Outside-air-intake damper switch.** A motorised damper on a
-  fresh-air intake. When smart_climate is running cooling overnight
+  fresh-air intake. When comfort_thermostat is running cooling overnight
   at low outdoor temperatures and the fresh-air damper is open,
   fresh cold air rushes in and amplifies the over-cooling problem.
   Coupling: when the unit is idle, optionally close the damper too;

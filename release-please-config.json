@@ -3,10 +3,11 @@
   "packages": {
     ".": {
       "release-type": "simple",
+      "release-as": "1.0.0",
       "extra-files": [
         {
           "type": "json",
-          "path": "custom_components/smart_climate/manifest.json",
+          "path": "custom_components/comfort_thermostat/manifest.json",
           "jsonpath": "$.version"
         }
       ]
