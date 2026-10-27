@@ -41,8 +41,14 @@ MIN_TEMP = 10.0
 MAX_TEMP = 35.0
 TEMP_STEP = 0.5
 
-# Minimum allowed difference between low and high setpoints
-MIN_TEMP_DIFF = 0.5
+# Minimum allowed difference between low and high setpoints.  Setpoints sent
+# to the device are whole degrees and the unit holds the room up to ~0.5 °C
+# *above* whatever it is given, so the band must leave room for both:
+#   HEAT sends ceil(low):       low = 21.5 → 22, room 22–22.5, needs high ≥ low + 1.0
+#   COOL sends floor(high - 1): high = 22.5 → 21, needs low ≤ 21, i.e. high ≥ low + 1.5
+# 1.5 °C is the smallest width that keeps the room in band in both
+# directions for every band on the TEMP_STEP grid (#6).
+MIN_TEMP_DIFF = 1.5
 
 # AUTO mode picks HEAT or COOL once and holds it; the real device's setpoint
 # is the comfort-band midpoint and the (modulating) device is left to settle

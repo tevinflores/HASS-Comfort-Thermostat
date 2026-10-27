@@ -23,6 +23,7 @@ from custom_components.comfort_thermostat.const import (
     CONF_SLEEP_MIN,
     DEFAULT_HOME_MAX,
     DEFAULT_HOME_MIN,
+    MIN_TEMP_DIFF,
 )
 
 
@@ -313,3 +314,133 @@ class TestOptionsFlowFahrenheit:
         entry = self._entry(options={CONF_HOME_MIN: 20.5})
         defaults = _schema_defaults(await _build_options_schema(entry, "°C"))
         assert defaults[CONF_HOME_MIN] == 20.5
+
+
+# ---------------------------------------------------------------------------
+# Options flow — minimum comfort-band width (issue #6)
+# ---------------------------------------------------------------------------
+
+class TestOptionsFlowRangeWidth:
+    """Each preset's high must be at least MIN_TEMP_DIFF above its low,
+    checked in °C after converting from the display unit."""
+
+    _VALID = {
+        CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+        CONF_HOME_MIN: 21.0,
+        CONF_HOME_MAX: 24.0,
+        CONF_SLEEP_MIN: 19.0,
+        CONF_SLEEP_MAX: 22.0,
+        CONF_AWAY_MIN: 18.0,
+        CONF_AWAY_MAX: 26.0,
+    }
+
+    async def _submit(self, user_input: dict, unit: str = "°C") -> dict:
+        entry = _make_entry(
+            data={CONF_REAL_CLIMATE: REAL_CLIMATE_ID, CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID}
+        )
+        flow = _make_options_flow(entry, unit)
+        result: dict = {}
+
+        def _form(*, step_id, data_schema, errors=None, **kwargs):
+            result.update(
+                type="form",
+                errors=errors or {},
+                schema=data_schema,
+                placeholders=kwargs.get("description_placeholders") or {},
+            )
+            return result
+
+        def _create(*, title, data):
+            result.update(type="create_entry", data=data)
+            return result
+
+        flow.async_show_form = _form  # type: ignore[assignment]
+        flow.async_create_entry = _create  # type: ignore[assignment]
+        await flow.async_step_init(user_input)
+        return result
+
+    @pytest.mark.asyncio
+    async def test_valid_ranges_saved(self):
+        result = await self._submit(dict(self._VALID))
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "low_key,high_key",
+        [
+            (CONF_HOME_MIN, CONF_HOME_MAX),
+            (CONF_SLEEP_MIN, CONF_SLEEP_MAX),
+            (CONF_AWAY_MIN, CONF_AWAY_MAX),
+        ],
+    )
+    async def test_narrow_range_rejected(self, low_key, high_key):
+        user_input = dict(self._VALID)
+        user_input[low_key] = 21.5
+        user_input[high_key] = 22.0
+        result = await self._submit(user_input)
+        assert result["type"] == "form"
+        assert result["errors"] == {high_key: "range_too_narrow"}
+
+    @pytest.mark.asyncio
+    async def test_inverted_range_rejected(self):
+        user_input = dict(self._VALID)
+        user_input[CONF_HOME_MIN] = 24.0
+        user_input[CONF_HOME_MAX] = 21.0
+        result = await self._submit(user_input)
+        assert result["errors"] == {CONF_HOME_MAX: "range_too_narrow"}
+
+    @pytest.mark.asyncio
+    async def test_exact_min_width_accepted(self):
+        user_input = dict(self._VALID)
+        user_input[CONF_HOME_MIN] = 21.0
+        user_input[CONF_HOME_MAX] = 21.0 + MIN_TEMP_DIFF
+        result = await self._submit(user_input)
+        assert result["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_rejected_form_keeps_submitted_values(self):
+        user_input = dict(self._VALID)
+        user_input[CONF_HOME_MIN] = 21.5
+        user_input[CONF_HOME_MAX] = 22.0
+        result = await self._submit(user_input)
+        suggested = _schema_suggested(result["schema"])
+        assert suggested[CONF_HOME_MIN] == 21.5
+        assert suggested[CONF_HOME_MAX] == 22.0
+
+    @pytest.mark.asyncio
+    async def test_fahrenheit_checked_in_celsius(self):
+        """2 °F (1.1 °C) is too narrow; 3 °F (1.7 °C) is enough."""
+        f_valid = {
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_HOME_MIN: 70.0,
+            CONF_HOME_MAX: 75.0,
+            CONF_SLEEP_MIN: 66.0,
+            CONF_SLEEP_MAX: 72.0,
+            CONF_AWAY_MIN: 64.0,
+            CONF_AWAY_MAX: 79.0,
+        }
+        narrow = dict(f_valid, **{CONF_HOME_MAX: 72.0})
+        assert (await self._submit(narrow, "°F"))["errors"] == {
+            CONF_HOME_MAX: "range_too_narrow"
+        }
+        wide_enough = dict(f_valid, **{CONF_HOME_MAX: 73.0})
+        assert (await self._submit(wide_enough, "°F"))["type"] == "create_entry"
+
+    @pytest.mark.asyncio
+    async def test_error_shows_min_width_in_display_unit(self):
+        user_input = dict(self._VALID)
+        user_input[CONF_HOME_MAX] = 21.5
+        result = await self._submit(user_input)
+        assert result["placeholders"]["min_diff"] == "1.5 °C"
+
+        f_input = {
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_HOME_MIN: 70.0,
+            CONF_HOME_MAX: 71.0,
+            CONF_SLEEP_MIN: 66.0,
+            CONF_SLEEP_MAX: 72.0,
+            CONF_AWAY_MIN: 64.0,
+            CONF_AWAY_MAX: 79.0,
+        }
+        result = await self._submit(f_input, "°F")
+        assert result["placeholders"]["min_diff"] == "2.7 °F"

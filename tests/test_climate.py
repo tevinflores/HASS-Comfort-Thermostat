@@ -22,6 +22,8 @@ from homeassistant.core import HomeAssistant
 
 from custom_components.comfort_thermostat.climate import ComfortThermostatEntity, SUPPORTED_PRESETS
 from custom_components.comfort_thermostat.const import (
+    CONF_HOME_MAX,
+    CONF_HOME_MIN,
     CONF_REAL_CLIMATE,
     CONF_INSIDE_SENSOR,
     CONF_INSIDE_SENSOR_AWAY,
@@ -38,7 +40,9 @@ from custom_components.comfort_thermostat.const import (
     FLIP_MARGIN,
     INSIDE_TEMP_PLAUSIBLE_MAX,
     INSIDE_TEMP_PLAUSIBLE_MIN,
+    MAX_TEMP,
     MIN_CHANGEOVER_INTERVAL,
+    MIN_TEMP,
     MIN_TEMP_DIFF,
     OUT_OF_BAND_ALERT_MINUTES,
     SENSOR_STALE_MINUTES,
@@ -2796,3 +2800,135 @@ class TestImplausibleReadings:
         entity, hass = self._entity("garbage")
 
         assert "inside_sensor_invalid" in entity._detect_problems()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – minimum comfort-band width (issue #6)
+# ---------------------------------------------------------------------------
+
+# The Midea unit holds the room up to ~0.5 °C above whatever setpoint it is
+# given, in both HEAT and COOL (see CLAUDE.md, "AUTO Mode Logic").
+UNIT_OVERSHOOT = 0.5
+
+
+def _band_grid():
+    """Every (low, width) on the TEMP_STEP grid with width >= MIN_TEMP_DIFF."""
+    widths = [MIN_TEMP_DIFF + 0.5 * i for i in range(3)]
+    lows = [18.0 + 0.5 * i for i in range(9)]
+    return [(low, width) for low in lows for width in widths]
+
+
+class TestMinRangeWidth:
+    """MIN_TEMP_DIFF must be wide enough that the whole-degree setpoint plus
+    the unit's upward overshoot stays inside [low, high] in both directions,
+    and every way a band can be set must enforce it."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("direction", [HVACMode.HEAT, HVACMode.COOL])
+    @pytest.mark.parametrize("low,width", _band_grid())
+    async def test_min_width_keeps_unit_in_band(self, direction, low, width):
+        high = low + width
+        hass = _make_hass_mock(
+            real_climate_state=direction.value, real_climate_temp=None
+        )
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_NONE
+        entity._target_temp_low = low
+        entity._target_temp_high = high
+        entity._current_temperature = (low + high) / 2.0
+        entity._auto_mode = direction
+
+        await entity._async_sync_real_climate()
+
+        sent = hass.services.async_call.call_args[0][2]["temperature"]
+        assert low <= sent and sent + UNIT_OVERSHOOT <= high, (
+            f"[{low}, {high}] {direction}: unit holds [{sent}, {sent + UNIT_OVERSHOOT}]"
+        )
+
+    def _entity(self, low=20.0, high=25.0):
+        hass = _make_hass_mock()
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.OFF
+        entity._preset_mode = PRESET_NONE
+        entity._target_temp_low = low
+        entity._target_temp_high = high
+        entity.async_write_ha_state = MagicMock()
+        return entity
+
+    @pytest.mark.asyncio
+    async def test_edited_high_pushes_low_down(self):
+        entity = self._entity()
+        await entity.async_set_temperature(target_temp_low=22.0, target_temp_high=22.5)
+        assert (entity._target_temp_low, entity._target_temp_high) == (
+            22.5 - MIN_TEMP_DIFF,
+            22.5,
+        )
+
+    @pytest.mark.asyncio
+    async def test_edited_low_pushes_high_up(self):
+        entity = self._entity(high=25.0)
+        await entity.async_set_temperature(target_temp_low=24.5)
+        assert (entity._target_temp_low, entity._target_temp_high) == (
+            24.5,
+            24.5 + MIN_TEMP_DIFF,
+        )
+
+    @pytest.mark.asyncio
+    async def test_widening_never_goes_below_min_temp(self):
+        entity = self._entity()
+        await entity.async_set_temperature(target_temp_low=MIN_TEMP, target_temp_high=MIN_TEMP)
+        assert (entity._target_temp_low, entity._target_temp_high) == (
+            MIN_TEMP,
+            MIN_TEMP + MIN_TEMP_DIFF,
+        )
+
+    @pytest.mark.asyncio
+    async def test_widening_never_goes_above_max_temp(self):
+        entity = self._entity(high=MAX_TEMP)
+        await entity.async_set_temperature(target_temp_low=MAX_TEMP)
+        assert (entity._target_temp_low, entity._target_temp_high) == (
+            MAX_TEMP - MIN_TEMP_DIFF,
+            MAX_TEMP,
+        )
+
+    def test_narrow_configured_preset_is_widened(self):
+        """Existing entries saved under the old 0.5 °C minimum keep working:
+        the band is widened upward from its low edge."""
+        entity = _make_entity(
+            _make_hass_mock(),
+            {
+                CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
+                CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+                CONF_HOME_MIN: 21.5,
+                CONF_HOME_MAX: 21.5,
+            },
+        )
+        assert entity._preset_ranges[PRESET_HOME] == (21.5, 21.5 + MIN_TEMP_DIFF)
+
+    def test_wide_configured_preset_untouched(self):
+        entity = _make_entity(_make_hass_mock())
+        assert entity._preset_ranges[PRESET_HOME] == (DEFAULT_HOME_MIN, DEFAULT_HOME_MAX)
+
+    def test_restored_narrow_manual_band_is_widened(self):
+        entity = _make_entity(_make_hass_mock())
+        last_state = MagicMock()
+        last_state.state = HVACMode.AUTO.value
+        last_state.attributes = {
+            "preset_mode": PRESET_NONE,
+            "target_temp_low": 21.5,
+            "target_temp_high": 21.5,
+        }
+        entity._restore_from_state(last_state)
+        assert (entity._target_temp_low, entity._target_temp_high) == (
+            21.5,
+            21.5 + MIN_TEMP_DIFF,
+        )
+
+    def test_default_presets_respect_min_width(self):
+        for low, high in [
+            (DEFAULT_HOME_MIN, DEFAULT_HOME_MAX),
+            (DEFAULT_SLEEP_MIN, DEFAULT_SLEEP_MAX),
+            (DEFAULT_AWAY_MIN, DEFAULT_AWAY_MAX),
+        ]:
+            assert high - low >= MIN_TEMP_DIFF

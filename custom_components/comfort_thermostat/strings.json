@@ -39,6 +39,9 @@
           "away_max": "Away – High Setpoint"
         }
       }
+    },
+    "error": {
+      "range_too_narrow": "The high setpoint must be at least {min_diff} above the low setpoint."
     }
   }
 }
