@@ -37,9 +37,12 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, State, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util.unit_conversion import TemperatureConverter
 
@@ -62,9 +65,13 @@ from .const import (
     DEFAULT_HOME_MIN,
     DEFAULT_SLEEP_MAX,
     DEFAULT_SLEEP_MIN,
+    FAST_FLIP_CONFIRM,
     FLIP_DWELL,
     FLIP_MARGIN,
+    INSIDE_TEMP_PLAUSIBLE_MAX,
+    INSIDE_TEMP_PLAUSIBLE_MIN,
     MAX_TEMP,
+    MIN_CHANGEOVER_INTERVAL,
     MIN_TEMP,
     MIN_TEMP_DIFF,
     OUT_OF_BAND_ALERT_MINUTES,
@@ -200,6 +207,20 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # the temperature returns to the correct half of the band; flips
         # _auto_mode once it has been set continuously for FLIP_DWELL.
         self._pending_flip_since: datetime.datetime | None = None
+
+        # Timestamp at which the fast-flip band-edge violation was first
+        # seen; it must hold for FAST_FLIP_CONFIRM before the flip fires.
+        self._fast_flip_since: datetime.datetime | None = None
+
+        # When AUTO last changed direction (fast or dwell flip, not the
+        # initial pick).  Spaces changeovers by MIN_CHANGEOVER_INTERVAL.
+        self._last_changeover_at: datetime.datetime | None = None
+
+        # Pending re-check for a fast-flip that is waiting on confirmation
+        # or on the changeover interval.  Needed because a report-on-change
+        # sensor can sit steadily past the band edge and never send the
+        # reading that would otherwise re-run the decision.
+        self._flip_recheck_unsub: CALLBACK_TYPE | None = None
 
         # Last unit command (HEAT/COOL/OFF) the wrapper computed for the
         # real device.  Used by the hvac_action property to surface IDLE
@@ -423,6 +444,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             )
         )
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel a pending fast-flip re-check so it can't fire after removal."""
+        self._cancel_flip_recheck()
+        await super().async_will_remove_from_hass()
+
     def _restore_from_state(self, last_state: State) -> None:
         """Rehydrate internal state from a previously saved HA state.
 
@@ -578,7 +604,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     def _read_inside_temperature(self) -> float | None:
         """Return the active inside sensor's reading in °C, or ``None``.
 
-        ``None`` covers unavailable, unknown, missing and unparsable states.
+        ``None`` covers unavailable, unknown, missing, unparsable and
+        implausible states (outside ``INSIDE_TEMP_PLAUSIBLE_MIN``..``_MAX``
+        after conversion, #3).
         Callers must publish it as-is rather than keep the previous value:
         ``current_temperature`` is forwarded to the unit via Follow Me, so a
         stale number there is regulated against as if it were live (#4).
@@ -592,7 +620,10 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             return None
         if math.isnan(value):
             return None
-        return self._to_celsius(value, self._sensor_unit(state))
+        celsius = self._to_celsius(value, self._sensor_unit(state))
+        if not INSIDE_TEMP_PLAUSIBLE_MIN <= celsius <= INSIDE_TEMP_PLAUSIBLE_MAX:
+            return None
+        return celsius
 
     def _sync_from_sensors(self) -> None:
         """Pull current temperatures from the sensor entities at startup."""
@@ -804,6 +835,17 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         elif inside_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, None, ""):
             problems.append(f"inside_sensor_{inside_state.state}")
         else:
+            # Readings _read_inside_temperature() rejects (#3), so AUTO is
+            # running without them; say which, in °C.
+            try:
+                reading = self._to_celsius(
+                    float(inside_state.state), self._sensor_unit(inside_state)
+                )
+            except (ValueError, TypeError):
+                problems.append("inside_sensor_invalid")
+            else:
+                if not INSIDE_TEMP_PLAUSIBLE_MIN <= reading <= INSIDE_TEMP_PLAUSIBLE_MAX:
+                    problems.append(f"inside_sensor_implausible:{round(reading, 1)}")
             try:
                 last = inside_state.last_updated
                 if last.tzinfo is None:
@@ -946,7 +988,10 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
         # Fast-flip on band-edge violation: when the committed direction
         # is the *opposite* of what's needed AND the room is past the
-        # band edge, flip immediately — skip FLIP_DWELL.
+        # band edge, flip without waiting out FLIP_DWELL — but only once the
+        # violation has held for FAST_FLIP_CONFIRM, and no sooner than
+        # MIN_CHANGEOVER_INTERVAL after the previous changeover (#3).  One
+        # bad reading used to reverse the heat pump on the spot.
         #
         # The dwell timer (30 min sustained excursion past mid ± FLIP_MARGIN)
         # is sized for sensor jitter / natural drift around the midpoint.
@@ -959,14 +1004,25 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # 2026-04-26 (PR #62 fixed the *initial* pick that caused it;
         # this is the belt-and-suspenders catch for any future scenario
         # that lands committed-direction at odds with the band).
+        now = self._now()
         if (
             (self._auto_mode == HVACMode.HEAT and inside > high)
             or (self._auto_mode == HVACMode.COOL and inside < low)
         ):
-            self._auto_mode = (
-                HVACMode.COOL if self._auto_mode == HVACMode.HEAT else HVACMode.HEAT
+            if self._fast_flip_since is None:
+                self._fast_flip_since = now
+            confirm_left = (
+                FAST_FLIP_CONFIRM - (now - self._fast_flip_since).total_seconds()
             )
-            self._pending_flip_since = None
+            wait = max(confirm_left, self._changeover_wait(now))
+            if wait <= 0:
+                self._flip_direction(now)
+            else:
+                self._schedule_flip_recheck(wait)
+        elif self._fast_flip_since is not None:
+            # Back on the right side of the edge: the violation was a blip.
+            self._fast_flip_since = None
+            self._cancel_flip_recheck()
 
         # Sticky direction-flip evaluation (unchanged from v2.0.0).  Wrong-
         # side / right-side bands have a deadzone in between (mid ± FLIP_MARGIN)
@@ -980,15 +1036,14 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             wrong_side = inside >= mid + FLIP_MARGIN
             right_side = inside <= mid
 
-        now = self._now()
         if wrong_side:
             if self._pending_flip_since is None:
                 self._pending_flip_since = now
-            elif (now - self._pending_flip_since).total_seconds() >= FLIP_DWELL:
-                self._auto_mode = (
-                    HVACMode.HEAT if self._auto_mode == HVACMode.COOL else HVACMode.COOL
-                )
-                self._pending_flip_since = None
+            elif (
+                (now - self._pending_flip_since).total_seconds() >= FLIP_DWELL
+                and self._changeover_wait(now) <= 0
+            ):
+                self._flip_direction(now)
         elif right_side:
             self._pending_flip_since = None
 
@@ -998,6 +1053,42 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # the room near the band edge that matches the committed
         # direction without the wrapper's intervention.
         return self._auto_mode
+
+    def _flip_direction(self, now: datetime.datetime) -> None:
+        """Commit the opposite AUTO direction and start the changeover clock."""
+        self._auto_mode = (
+            HVACMode.COOL if self._auto_mode == HVACMode.HEAT else HVACMode.HEAT
+        )
+        self._pending_flip_since = None
+        self._fast_flip_since = None
+        self._last_changeover_at = now
+        self._cancel_flip_recheck()
+
+    def _changeover_wait(self, now: datetime.datetime) -> float:
+        """Seconds until MIN_CHANGEOVER_INTERVAL allows another changeover."""
+        if self._last_changeover_at is None:
+            return 0.0
+        elapsed = (now - self._last_changeover_at).total_seconds()
+        return max(0.0, MIN_CHANGEOVER_INTERVAL - elapsed)
+
+    def _schedule_flip_recheck(self, delay: float) -> None:
+        """Re-run the AUTO decision after ``delay`` seconds, replacing any
+        pending re-check."""
+        self._cancel_flip_recheck()
+        self._flip_recheck_unsub = async_call_later(
+            self.hass, delay, self._async_flip_recheck
+        )
+
+    def _cancel_flip_recheck(self) -> None:
+        if self._flip_recheck_unsub is not None:
+            self._flip_recheck_unsub()
+            self._flip_recheck_unsub = None
+
+    @callback
+    def _async_flip_recheck(self, _now: datetime.datetime | None) -> None:
+        self._flip_recheck_unsub = None
+        if self._hvac_mode == HVACMode.AUTO and not self._updating_from_control:
+            self.hass.async_create_task(self._async_sync_real_climate())
 
     # ------------------------------------------------------------------
     # Real-climate synchronisation
@@ -1171,6 +1262,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             if hvac_mode != HVACMode.AUTO:
                 self._auto_mode = None
                 self._pending_flip_since = None
+                self._fast_flip_since = None
+                self._cancel_flip_recheck()
 
             if hvac_mode == HVACMode.OFF:
                 await self.hass.services.async_call(

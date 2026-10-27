@@ -115,6 +115,11 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   (in °C) and for how long (in seconds, default 30 min) the inside
   temperature must persist *against* the committed AUTO mode before
   HEAT↔COOL flips.
+- `FAST_FLIP_CONFIRM` (3 min) / `MIN_CHANGEOVER_INTERVAL` (10 min): how
+  long a band-edge violation must hold before the fast-flip fires, and
+  the minimum spacing between AUTO changeovers (#3).
+- `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` (0–45 °C): inside readings
+  outside this range count as no reading (#3).
 
 ### AUTO Mode Logic — sticky-mode for modulating real devices
 
@@ -518,12 +523,16 @@ logic below into a coin toss.
 
 Direction commitment changes on two timelines, by severity:
 
-1. **Fast-flip — band-edge violation** (immediate).  When the
-   committed direction is the *opposite* of demand AND inside is
-   strictly past the band edge (`HEAT committed & inside > high`,
-   or `COOL committed & inside < low`), flip on the very next
-   sensor tick.  No dwell, no jitter filter — there's no legitimate
-   jitter explanation for inside being past the wrong band edge.
+1. **Fast-flip — band-edge violation** (`FAST_FLIP_CONFIRM`, 3 min).
+   When the committed direction is the *opposite* of demand AND inside
+   is strictly past the band edge (`HEAT committed & inside > high`,
+   or `COOL committed & inside < low`), flip once that has held for
+   `FAST_FLIP_CONFIRM` — not the 30-min dwell.  Until #3 this fired on
+   the very first tick, so a single bad reading (the same class as the
+   2026-04-26 Z-Wave re-initialisation glitch) reversed the heat pump.
+   The first violation schedules its own re-check (`async_call_later`),
+   because a report-on-change sensor can sit steadily past the edge and
+   never send the reading that would otherwise re-run the decision.
 
 2. **Dwell-flip — sustained margin excursion** (30 min).  When
    inside crosses `mid ± FLIP_MARGIN` against the committed
@@ -531,11 +540,17 @@ Direction commitment changes on two timelines, by severity:
    `FLIP_DWELL` logic filters jitter and only commits the flip
    after sustained pressure.
 
+Both flips are spaced by **`MIN_CHANGEOVER_INTERVAL`** (10 min) from
+the previous AUTO changeover, so the wrapper can't ping-pong the
+reversing valve.  The initial pick doesn't count as a changeover, and
+the user's explicit HEAT↔COOL mode changes are not blocked (the pause
+for those is #11).  `_last_changeover_at` is not persisted.
+
 Live regression 2026-04-26: with HEAT committed (from a stale
 state surviving an integration reload that pre-dated the v3.0.2
 initial-pick fix), inside at 23.3 °C took 30 minutes to flip to
 COOL — during which the wrapper actively heated the hot room.
-The fast-flip catches this on the first sensor tick.
+The fast-flip now catches this within `FAST_FLIP_CONFIRM`.
 
 ### Problem detection (`problems` attribute)
 
@@ -555,6 +570,8 @@ Conditions checked:
 | Code | Meaning | Threshold |
 |---|---|---|
 | `inside_sensor_unavailable` / `_unknown` / `_missing` | Inside-temp sensor is unreachable | immediate |
+| `inside_sensor_invalid` | Inside sensor state isn't a number; treated as no reading | immediate |
+| `inside_sensor_implausible:N` | Inside reading (°C) outside `INSIDE_TEMP_PLAUSIBLE_MIN`..`_MAX` (0–45); treated as no reading (#3) | immediate |
 | `sensor_stale:Nmin` | Inside sensor hasn't updated in N minutes | `SENSOR_STALE_MINUTES` (15) |
 | `real_climate_unavailable` / `_missing` | Wrapped climate device is unreachable | immediate |
 | `auto_waiting_for_reading` | AUTO has no inside reading and no committed direction, so the device is left untouched (#5) | immediate |
@@ -591,10 +608,13 @@ during sensor re-initialisation, committing the wrapper to HEAT for
 a room that was actually at 22.7 °C.  Persisted state means we keep
 the previously-correct commitment instead of guessing again.
 
-`_pending_flip_since`, `_out_of_band_since`, and `_cool_start_times`
-are *not* persisted — they re-arm naturally from sensor data and
-the worst-case latency on each is acceptable (`FLIP_DWELL` 30 min,
-`OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).
+`_pending_flip_since`, `_fast_flip_since`, `_last_changeover_at`,
+`_out_of_band_since`, and `_cool_start_times` are *not* persisted —
+they re-arm naturally from sensor data and the worst-case latency on
+each is acceptable (`FLIP_DWELL` 30 min, `FAST_FLIP_CONFIRM` 3 min,
+`OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).  Losing
+`_last_changeover_at` only means the first changeover after a restart
+isn't spaced from the last one before it.
 
 ## Future Work — Mode-flip transition OFF (not implemented)
 
