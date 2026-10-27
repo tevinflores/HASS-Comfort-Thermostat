@@ -373,10 +373,13 @@ AND the sensor used when the user is in manual mode (PRESET_NONE)".
 - All configured sensors are tracked with one
   `async_track_state_change_event` subscription at startup.  The
   dispatcher in `_async_entity_state_changed` only routes inside-
-  sensor updates when the changed entity matches
-  `_active_sensor_id()` — events from a configured-but-currently-
-  inactive sensor are observed by HA but ignored by the wrapper,
-  so they cannot clobber `_current_temperature`.
+  sensor updates when the changed entity is `_active_sensor_id()`
+  **or the active preset's own sensor** — events from any other
+  configured sensor are observed by HA but ignored by the wrapper,
+  so they cannot clobber `_current_temperature`.  The preset's own
+  sensor must be routed even while the fallback is active: its going
+  unavailable is what makes the fallback active, and dropping that
+  event left the dead sensor's last reading stuck (#4).
 - On preset change (`async_set_preset_mode`), the wrapper calls
   `_sync_from_sensors()` synchronously so the new sensor's value
   is read before the AUTO algorithm next runs — no one-tick stale-
@@ -384,6 +387,13 @@ AND the sensor used when the user is in manual mode (PRESET_NONE)".
 - **Fallback on outage.**  If the per-preset sensor is unavailable
   / unknown / missing, `_active_sensor_id()` transparently returns
   `CONF_INSIDE_SENSOR`.  AUTO never stalls on a missing sensor.
+- **No reading → `None`, never the last value** (#4).  If the active
+  sensor (after fallback) is unavailable / unknown / unparsable,
+  `_current_temperature` becomes `None` and AUTO makes no decision:
+  the committed direction and device command stay put until a fresh
+  reading arrives.  A sensor that is merely *quiet* is not treated as
+  dead — report-on-change sensors go quiet in a steady room; that case
+  is only surfaced as `sensor_stale` in `problems`.
 - **Problem reporting.**  When the fallback is in use,
   `_detect_problems()` adds `preset_sensor_unavailable:<preset>`
   to the `problems` attribute so dashboards can surface chronic
@@ -409,6 +419,14 @@ Two options on the ESPHome side:
   re-binds.  More code, no real benefit if option 1 works.
 
 Option 1 is the contract.
+
+**Known firmware limitation.**  When `current_temperature` goes to
+`None` (dead sensor, #4), ESPHome-Midea-XYE's
+`on_follow_me_sensor_update_` ignores the NaN and simply stops sending
+Follow Me updates.  It does not tell the unit to stop Follow Me, so the
+unit keeps regulating on the last value it received.  The wrapper side
+is correct; making the unit fall back to its own return-air sensor
+needs a firmware change (#24).
 
 ### Constraints honoured
 

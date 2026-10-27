@@ -2210,3 +2210,130 @@ class TestFahrenheitSystem:
         assert entity._target_temperature == pytest.approx(
             (DEFAULT_HOME_MIN + DEFAULT_HOME_MAX) / 2.0
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – dead inside sensor (issue #4)
+# ---------------------------------------------------------------------------
+
+class TestDeadInsideSensor:
+    """A dead inside sensor must not leave a frozen reading behind.
+
+    ``current_temperature`` is what ESPHome forwards to the unit via Follow
+    Me, and what AUTO decides on.  When the active sensor (and its fallback)
+    is unavailable / unknown / unreadable, publish ``None`` and make no AUTO
+    decisions until a fresh reading arrives.
+    """
+
+    def _config(self) -> dict:
+        return {
+            CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_INSIDE_SENSOR_SLEEP: SLEEP_SENSOR_ID,
+        }
+
+    def _entity(self, inside_temp=22.0, sleep_temp=20.0, preset=PRESET_HOME):
+        hass = _make_multi_sensor_hass_mock(
+            inside_temp=inside_temp,
+            sleep_temp=sleep_temp,
+            real_climate_state=HVACMode.HEAT.value,
+        )
+        entity = _make_entity(hass, self._config())
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = preset
+        entity._auto_mode = HVACMode.HEAT
+        entity._current_temperature = 22.0
+        entity.async_write_ha_state = MagicMock()
+        return entity, hass
+
+    def _kill(self, entity, sensor_value, sleep_value=20.0):
+        """Swap the hass mock's sensor states, keeping the entity as-is."""
+        new_hass = _make_multi_sensor_hass_mock(
+            inside_temp=sensor_value,
+            sleep_temp=sleep_value,
+            real_climate_state=HVACMode.HEAT.value,
+        )
+        entity.hass.states.get = new_hass.states.get
+
+    @pytest.mark.parametrize("dead", ["unavailable", "unknown", "garbage", None])
+    def test_dead_active_sensor_clears_current_temperature(self, dead):
+        entity, hass = self._entity()
+        self._kill(entity, dead)
+
+        entity._on_inside_sensor_update()
+
+        assert entity._current_temperature is None
+        assert entity.current_temperature is None
+        entity.async_write_ha_state.assert_called()
+
+    def test_dead_sensor_publishes_null_current_temperature(self):
+        """The state attribute ESPHome reads must be null, not the old value."""
+        entity, hass = self._entity()
+        self._kill(entity, "unavailable")
+        entity._on_inside_sensor_update()
+
+        with patch(
+            "homeassistant.components.climate.ClimateEntity.state_attributes",
+            new_callable=PropertyMock,
+            return_value={ATTR_CURRENT_TEMPERATURE: None},
+        ):
+            attrs = entity.state_attributes
+        assert attrs[ATTR_CURRENT_TEMPERATURE] is None
+
+    def test_dead_sensor_makes_no_auto_decision(self):
+        entity, hass = self._entity()
+        self._kill(entity, "unavailable")
+
+        entity._on_inside_sensor_update()
+
+        hass.async_create_task.assert_not_called()
+        assert entity._auto_mode == HVACMode.HEAT
+
+    def test_recovered_sensor_resumes(self):
+        entity, hass = self._entity()
+        self._kill(entity, "unavailable")
+        entity._on_inside_sensor_update()
+
+        self._kill(entity, 22.6)
+        entity._on_inside_sensor_update()
+
+        assert entity._current_temperature == pytest.approx(22.6)
+        hass.async_create_task.assert_called_once()
+        hass.async_create_task.call_args.args[0].close()
+
+    def test_dead_preset_sensor_event_switches_to_fallback(self):
+        """Sleep sensor dies while Sleep is active: its event must still be
+        handled so the reading switches to the fallback sensor, instead of
+        the dead sensor's last value sticking."""
+        entity, hass = self._entity(inside_temp=22.0, sleep_temp=19.5, preset=PRESET_SLEEP)
+        entity._current_temperature = 19.5
+        self._kill(entity, 22.0, sleep_value="unavailable")
+
+        event = MagicMock()
+        event.data = {"entity_id": SLEEP_SENSOR_ID}
+        entity._async_entity_state_changed(event)
+
+        assert entity._current_temperature == pytest.approx(22.0)
+
+    def test_preset_and_fallback_both_dead_clears_reading(self):
+        entity, hass = self._entity(preset=PRESET_SLEEP)
+        entity._current_temperature = 19.5
+        self._kill(entity, "unavailable", sleep_value="unavailable")
+
+        event = MagicMock()
+        event.data = {"entity_id": SLEEP_SENSOR_ID}
+        entity._async_entity_state_changed(event)
+
+        assert entity._current_temperature is None
+
+    @pytest.mark.asyncio
+    async def test_preset_switch_to_dead_sensor_clears_reading(self):
+        """Switching to a preset whose sensor (and fallback) is dead must not
+        keep the previous preset's reading."""
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.OFF
+        self._kill(entity, "unavailable", sleep_value="unavailable")
+
+        await entity.async_set_preset_mode(PRESET_SLEEP)
+
+        assert entity._current_temperature is None

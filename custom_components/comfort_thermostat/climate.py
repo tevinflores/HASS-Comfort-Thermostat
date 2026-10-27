@@ -548,7 +548,13 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         entity_id: str = event.data.get("entity_id", "")
         if entity_id == self._real_climate_id:
             self._on_real_climate_update()
-        elif entity_id == self._active_sensor_id():
+        elif entity_id in (
+            self._active_sensor_id(),
+            # The preset's own sensor, even when it is no longer the active
+            # one: its going unavailable is exactly what makes the fallback
+            # active, and dropping that event left its last reading stuck.
+            self._preset_sensor_ids.get(self._preset_mode),
+        ):
             self._on_inside_sensor_update()
         elif entity_id == self._outside_sensor_id:
             self._on_outside_sensor_update()
@@ -569,20 +575,28 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             except ValueError:
                 pass
 
+    def _read_inside_temperature(self) -> float | None:
+        """Return the active inside sensor's reading in °C, or ``None``.
+
+        ``None`` covers unavailable, unknown, missing and unparsable states.
+        Callers must publish it as-is rather than keep the previous value:
+        ``current_temperature`` is forwarded to the unit via Follow Me, so a
+        stale number there is regulated against as if it were live (#4).
+        """
+        state = self.hass.states.get(self._active_sensor_id())
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, None):
+            return None
+        try:
+            value = float(state.state)
+        except (ValueError, TypeError):
+            return None
+        if math.isnan(value):
+            return None
+        return self._to_celsius(value, self._sensor_unit(state))
+
     def _sync_from_sensors(self) -> None:
         """Pull current temperatures from the sensor entities at startup."""
-        inside_state = self.hass.states.get(self._active_sensor_id())
-        if inside_state and inside_state.state not in (
-            STATE_UNAVAILABLE,
-            STATE_UNKNOWN,
-            None,
-        ):
-            try:
-                self._current_temperature = self._to_celsius(
-                    float(inside_state.state), self._sensor_unit(inside_state)
-                )
-            except (ValueError, TypeError):
-                pass
+        self._current_temperature = self._read_inside_temperature()
 
         if self._outside_sensor_id:
             outside_state = self.hass.states.get(self._outside_sensor_id)
@@ -631,19 +645,17 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     @callback
     def _on_inside_sensor_update(self) -> None:
         """Handle inside temperature sensor state changes."""
-        state = self.hass.states.get(self._active_sensor_id())
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return
-        try:
-            new_temp = float(state.state)
-        except (ValueError, TypeError):
-            return
-        if math.isnan(new_temp):
-            return
-        new_temp = self._to_celsius(new_temp, self._sensor_unit(state))
-
+        new_temp = self._read_inside_temperature()
         old_temp = self._current_temperature
         self._current_temperature = new_temp
+
+        if new_temp is None:
+            # No usable reading: publish it as unknown and make no AUTO
+            # decision.  The committed direction and the device command
+            # stay as they are until a fresh reading arrives.
+            if old_temp is not None:
+                self.async_write_ha_state()
+            return
 
         # Track sustained out-of-band excursions for problem detection.
         # Only meaningful in AUTO mode — manual HEAT/COOL/OFF is on the
