@@ -56,6 +56,25 @@ MIN_TEMP_DIFF = 0.5
 FLIP_MARGIN = 0.5
 FLIP_DWELL = 1800  # 30 min
 
+# Fast-flip (committed direction opposite to demand AND inside past the band
+# edge) skips FLIP_DWELL, but the violation must still hold this long so one
+# bad reading — e.g. a Z-Wave sensor re-initialising — can't reverse the heat
+# pump.  Short next to the 30 min of wrong-direction running fast-flip exists
+# to prevent, and the HEAT setpoint at `low` keeps the unit idle meanwhile.
+FAST_FLIP_CONFIRM = 180  # 3 min
+
+# Minimum spacing between AUTO's own HEAT↔COOL changeovers (fast or dwell),
+# so the wrapper can't ping-pong the reversing valve.  The initial pick and
+# the user's explicit mode changes are not counted (the pause for those is
+# a separate concern, #11).
+MIN_CHANGEOVER_INTERVAL = 600  # 10 min
+
+# Inside readings outside this range (°C, after unit conversion) are treated
+# as no reading at all: a failed sensor reporting -40 or 85 must not drive
+# AUTO.  Reported in `problems` as inside_sensor_implausible:<value>.
+INSIDE_TEMP_PLAUSIBLE_MIN = 0.0
+INSIDE_TEMP_PLAUSIBLE_MAX = 45.0
+
 # NOTE: COOL_RESTART_OFFSET (used in v3.0.x – v4.0.x for in-band COOL
 # hysteresis driven by the wrapper) was removed in v5.0.0.  Empirical
 # 2026-05-02 data showed the wrapper's deliberate-OFF cycling used

@@ -33,8 +33,12 @@ from custom_components.comfort_thermostat.const import (
     DEFAULT_SLEEP_MAX,
     DEFAULT_AWAY_MIN,
     DEFAULT_AWAY_MAX,
+    FAST_FLIP_CONFIRM,
     FLIP_DWELL,
     FLIP_MARGIN,
+    INSIDE_TEMP_PLAUSIBLE_MAX,
+    INSIDE_TEMP_PLAUSIBLE_MIN,
+    MIN_CHANGEOVER_INTERVAL,
     MIN_TEMP_DIFF,
     OUT_OF_BAND_ALERT_MINUTES,
     SENSOR_STALE_MINUTES,
@@ -304,14 +308,22 @@ class TestDesiredRealMode:
         assert heat_committed_below._desired_real_mode() == HVACMode.HEAT
 
         # Wrong-side band-edge excursions: fast-flip to the correct
-        # direction (see TestFastFlipOnBandViolation).
+        # direction once confirmed (see TestFastFlipOnBandViolation).
         cool_committed_below = self._entity(inside=low - 1)
         cool_committed_below._auto_mode = HVACMode.COOL
+        now, advance = _fake_clock()
+        cool_committed_below._now = now
+        cool_committed_below._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
         assert cool_committed_below._desired_real_mode() == HVACMode.HEAT
         assert cool_committed_below._auto_mode == HVACMode.HEAT
 
         heat_committed_above = self._entity(inside=high + 1)
         heat_committed_above._auto_mode = HVACMode.HEAT
+        now, advance = _fake_clock()
+        heat_committed_above._now = now
+        heat_committed_above._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
         assert heat_committed_above._desired_real_mode() == HVACMode.COOL
         assert heat_committed_above._auto_mode == HVACMode.COOL
 
@@ -351,10 +363,14 @@ class TestAutoHeatNeverOff:
         assert entity._desired_real_mode() == HVACMode.HEAT
 
     def test_heat_above_high_fast_flips_to_cool(self):
-        """HEAT committed + inside > high: fast-flip to COOL immediately
-        (no 30-min dwell wait).  Replaces the v2.0.0 / v3.0.0 wrong-
-        side HEAT passthrough — see TestFastFlipOnBandViolation."""
+        """HEAT committed + inside > high: fast-flip to COOL once confirmed
+        (FAST_FLIP_CONFIRM, not the 30-min dwell).  Replaces the v2.0.0 /
+        v3.0.0 wrong-side HEAT passthrough — see TestFastFlipOnBandViolation."""
         entity = self._entity(inside=23.5)
+        now, advance = _fake_clock()
+        entity._now = now
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
         assert entity._desired_real_mode() == HVACMode.COOL
         assert entity._auto_mode == HVACMode.COOL
 
@@ -519,8 +535,9 @@ class TestStickyAutoMode:
 class TestFastFlipOnBandViolation:
     """Fast-flip catches the case the dwell logic is too slow for:
     committed direction is the *opposite* of demand AND inside is past
-    the band edge.  No legitimate jitter explanation, so flip
-    immediately on the first such tick — skip FLIP_DWELL entirely.
+    the band edge.  It skips the 30-min FLIP_DWELL, but (since #3) must
+    hold for FAST_FLIP_CONFIRM so a single bad reading can't flip it —
+    see TestFastFlipConfirmation.
 
     Live regression 2026-04-26: with HEAT committed (from a bad initial
     pick or stale state) and inside at 23.3 (above high=23), the dwell
@@ -544,29 +561,40 @@ class TestFastFlipOnBandViolation:
         entity._preset_ranges[PRESET_HOME] = (low, high)
         entity._auto_mode = committed
         entity._pending_flip_since = None
-        now, _ = _fake_clock()
+        now, advance = _fake_clock()
         entity._now = now
+        entity._advance = advance
         return entity
 
-    def test_heat_committed_inside_above_high_flips_immediately(self):
-        """HEAT committed + inside > high → flip to COOL on first tick.
+    def _confirm(self, entity):
+        """First tick starts the confirmation; the next one, FAST_FLIP_CONFIRM
+        later with the violation still present, flips."""
+        entity._desired_real_mode()
+        entity._advance(FAST_FLIP_CONFIRM)
+        return entity._desired_real_mode()
+
+    def test_heat_committed_inside_above_high_flips_after_confirmation(self):
+        """HEAT committed + inside > high → flip to COOL once confirmed.
 
         Reproduces the live 2026-04-26 bug at 23.3 °C (above high=23).
         Pre-fix: dwell timer waited 30 min before flipping.
-        Post-fix: flip on the first sensor tick, no waiting.
+        Post-fix: flip after FAST_FLIP_CONFIRM, not FLIP_DWELL.
         """
         entity = self._entity(inside=23.3, committed=HVACMode.HEAT)
         entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.HEAT, "one reading must not flip"
+        entity._advance(FAST_FLIP_CONFIRM)
+        entity._desired_real_mode()
         assert entity._auto_mode == HVACMode.COOL, (
-            "Fast-flip must fire on first tick when committed=HEAT and "
-            "inside is above high — no dwell tolerable"
+            "Fast-flip must fire once committed=HEAT and inside above high "
+            "has held for FAST_FLIP_CONFIRM — no 30-min dwell"
         )
         assert entity._pending_flip_since is None
 
-    def test_cool_committed_inside_below_low_flips_immediately(self):
-        """Mirror: COOL committed + inside < low → flip to HEAT immediately."""
+    def test_cool_committed_inside_below_low_flips_after_confirmation(self):
+        """Mirror: COOL committed + inside < low → HEAT once confirmed."""
         entity = self._entity(inside=20.5, committed=HVACMode.COOL)
-        entity._desired_real_mode()
+        self._confirm(entity)
         assert entity._auto_mode == HVACMode.HEAT
         assert entity._pending_flip_since is None
 
@@ -611,7 +639,7 @@ class TestFastFlipOnBandViolation:
         """End-to-end: HEAT committed + inside=23.3 → fast-flip to COOL
         → unit command returns COOL (since inside > high under COOL)."""
         entity = self._entity(inside=23.3, committed=HVACMode.HEAT)
-        result = entity._desired_real_mode()
+        result = self._confirm(entity)
         assert entity._auto_mode == HVACMode.COOL
         assert result == HVACMode.COOL, (
             "Same tick that flips must produce the correct unit command — "
@@ -967,12 +995,18 @@ class TestAutoWithManualRange:
 
     @pytest.mark.asyncio
     async def test_fast_flip_still_works_after_range_edit(self):
-        """HEAT committed, manual band [21, 23], room rises past 23 → COOL."""
+        """HEAT committed, manual band [21, 23], room rises past 23 → COOL
+        once the violation is confirmed (#3)."""
         entity, hass = self._entity()
+        now, advance = _fake_clock()
+        entity._now = now
         await entity.async_set_temperature(target_temp_low=21.0, target_temp_high=23.0)
         hass.services.async_call.reset_mock()
 
         self._set_inside(hass, 23.4)
+        entity._on_inside_sensor_update()
+        await hass.async_create_task.call_args.args[0]
+        advance(FAST_FLIP_CONFIRM)
         entity._on_inside_sensor_update()
         await hass.async_create_task.call_args.args[0]
 
@@ -2546,3 +2580,219 @@ class TestControlsReachDevice:
         entity._on_inside_sensor_update()
 
         hass.async_create_task.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – fast-flip confirmation and changeover spacing (issue #3)
+# ---------------------------------------------------------------------------
+
+class TestFastFlipConfirmation:
+    """A band-edge violation must hold for FAST_FLIP_CONFIRM before the
+    fast-flip fires, and AUTO changeovers are spaced by at least
+    MIN_CHANGEOVER_INTERVAL.  One bad reading (e.g. a Z-Wave sensor
+    re-initialising) must never reverse the heat pump."""
+
+    def _entity(self, inside=23.4, committed=HVACMode.HEAT):
+        hass = _make_hass_mock(inside_temp=inside, real_climate_state=HVACMode.HEAT.value)
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_HOME
+        entity._preset_ranges[PRESET_HOME] = (21.0, 23.0)
+        entity._current_temperature = inside
+        entity._auto_mode = committed
+        entity.async_write_ha_state = MagicMock()
+        now, advance = _fake_clock()
+        entity._now = now
+        return entity, hass, advance
+
+    def test_single_spike_does_not_flip(self):
+        entity, hass, advance = self._entity(inside=23.4)
+        entity._desired_real_mode()
+
+        entity._current_temperature = 22.4  # next reading is back in band
+        advance(FAST_FLIP_CONFIRM)
+        entity._desired_real_mode()
+
+        assert entity._auto_mode == HVACMode.HEAT
+        assert entity._fast_flip_since is None
+
+    def test_violation_shorter_than_confirm_does_not_flip(self):
+        entity, hass, advance = self._entity(inside=23.4)
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM - 1)
+        entity._desired_real_mode()
+
+        assert entity._auto_mode == HVACMode.HEAT
+
+    def test_first_violation_schedules_recheck(self):
+        """A report-on-change sensor can sit steadily past the edge without
+        sending another reading, so the confirmation must re-check itself."""
+        entity, hass, advance = self._entity(inside=23.4)
+        with patch(
+            "custom_components.comfort_thermostat.climate.async_call_later"
+        ) as call_later:
+            entity._desired_real_mode()
+
+        call_later.assert_called_once()
+        assert call_later.call_args.args[1] == pytest.approx(FAST_FLIP_CONFIRM)
+
+    def test_recheck_runs_a_sync_in_auto(self):
+        entity, hass, advance = self._entity(inside=23.4)
+        with patch(
+            "custom_components.comfort_thermostat.climate.async_call_later"
+        ) as call_later:
+            entity._desired_real_mode()
+        recheck = call_later.call_args.args[2]
+
+        recheck(None)
+
+        hass.async_create_task.assert_called_once()
+        hass.async_create_task.call_args.args[0].close()
+
+    @pytest.mark.asyncio
+    async def test_leaving_auto_cancels_pending_fast_flip(self):
+        entity, hass, advance = self._entity(inside=23.4)
+        cancel = MagicMock()
+        with patch(
+            "custom_components.comfort_thermostat.climate.async_call_later",
+            return_value=cancel,
+        ):
+            entity._desired_real_mode()
+
+        await entity.async_set_hvac_mode(HVACMode.OFF)
+
+        cancel.assert_called_once()
+        assert entity._fast_flip_since is None
+
+    def test_changeover_blocked_within_min_interval(self):
+        """Flip to COOL, then the room drops below low: the confirmed
+        violation must still wait out MIN_CHANGEOVER_INTERVAL."""
+        entity, hass, advance = self._entity(inside=23.4)
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
+        entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.COOL
+
+        entity._current_temperature = 20.5
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
+        entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.COOL, "too soon after the last changeover"
+
+        advance(MIN_CHANGEOVER_INTERVAL)
+        entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.HEAT
+
+    def test_blocked_changeover_schedules_recheck_for_interval_end(self):
+        entity, hass, advance = self._entity(inside=23.4)
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
+        entity._desired_real_mode()  # → COOL at t = FAST_FLIP_CONFIRM
+
+        entity._current_temperature = 20.5
+        entity._desired_real_mode()
+        advance(FAST_FLIP_CONFIRM)
+        with patch(
+            "custom_components.comfort_thermostat.climate.async_call_later"
+        ) as call_later:
+            entity._desired_real_mode()
+
+        call_later.assert_called_once()
+        assert call_later.call_args.args[1] == pytest.approx(
+            MIN_CHANGEOVER_INTERVAL - FAST_FLIP_CONFIRM
+        )
+
+    def test_dwell_flip_respects_min_interval(self):
+        entity, hass, advance = self._entity(inside=22.6)  # past mid + margin
+        entity._last_changeover_at = entity._now()
+        entity._pending_flip_since = entity._now() - datetime.timedelta(seconds=FLIP_DWELL)
+
+        entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.HEAT
+
+        advance(MIN_CHANGEOVER_INTERVAL)
+        entity._desired_real_mode()
+        assert entity._auto_mode == HVACMode.COOL
+
+    def test_initial_pick_is_not_a_changeover(self):
+        entity, hass, advance = self._entity(inside=21.5, committed=None)  # below mid 22
+        entity._desired_real_mode()
+
+        assert entity._auto_mode == HVACMode.HEAT
+        assert entity._last_changeover_at is None
+
+    @pytest.mark.asyncio
+    async def test_manual_mode_change_not_blocked(self):
+        """The interval spaces AUTO's own changeovers; an explicit user
+        HEAT -> COOL still goes straight through (the pause is #11)."""
+        entity, hass, advance = self._entity()
+        entity._hvac_mode = HVACMode.HEAT
+        entity._last_changeover_at = entity._now()
+
+        await entity.async_set_hvac_mode(HVACMode.COOL)
+
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == HVACMode.COOL.value
+
+
+class TestImplausibleReadings:
+    """Readings outside [INSIDE_TEMP_PLAUSIBLE_MIN, _MAX] count as no
+    reading (issue #3): a failed sensor reporting -40 or 85 must not
+    drive AUTO, and is reported in ``problems``."""
+
+    def _entity(self, reading, unit=None):
+        hass = _make_hass_mock()
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._auto_mode = HVACMode.HEAT
+        entity._current_temperature = 22.0
+        entity.async_write_ha_state = MagicMock()
+        state = MagicMock()
+        state.state = str(reading)
+        state.attributes = {"unit_of_measurement": unit} if unit else {}
+        state.last_updated = datetime.datetime.now(datetime.timezone.utc)
+        orig_get = hass.states.get
+        hass.states.get = lambda eid: state if eid == INSIDE_SENSOR_ID else orig_get(eid)
+        return entity, hass
+
+    @pytest.mark.parametrize("reading", [-40.0, 85.0])
+    def test_implausible_reading_is_no_reading(self, reading):
+        entity, hass = self._entity(reading)
+
+        entity._on_inside_sensor_update()
+
+        assert entity._current_temperature is None
+        hass.async_create_task.assert_not_called()
+
+    @pytest.mark.parametrize("reading", [-40.0, 85.0])
+    def test_implausible_reading_reported(self, reading):
+        entity, hass = self._entity(reading)
+
+        assert f"inside_sensor_implausible:{reading}" in entity._detect_problems()
+
+    @pytest.mark.parametrize(
+        "reading", [INSIDE_TEMP_PLAUSIBLE_MIN, INSIDE_TEMP_PLAUSIBLE_MAX]
+    )
+    def test_range_bounds_are_plausible(self, reading):
+        entity, hass = self._entity(reading)
+
+        entity._on_inside_sensor_update()
+        hass.async_create_task.call_args.args[0].close()
+
+        assert entity._current_temperature == pytest.approx(reading)
+        assert not any(
+            p.startswith("inside_sensor_implausible") for p in entity._detect_problems()
+        )
+
+    def test_fahrenheit_reading_checked_after_conversion(self):
+        """72 °F is 22.2 °C, so plausible, even though 72 > 45."""
+        entity, hass = self._entity(72.0, unit="°F")
+
+        entity._on_inside_sensor_update()
+        hass.async_create_task.call_args.args[0].close()
+
+        assert entity._current_temperature == pytest.approx(22.22, abs=0.01)
+
+    def test_non_numeric_reading_reported(self):
+        entity, hass = self._entity("garbage")
+
+        assert "inside_sensor_invalid" in entity._detect_problems()
