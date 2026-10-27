@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.0...v1.0.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **climate:** keep AUTO switching heat/cool after a manual range edit ([5bbe20e](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/5bbe20eedc49e46a8dd7b87d3d16b77f7dd41376)), closes [#2](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/2)
+
 ## [1.0.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/45cc397a5cb5d4b5ccb5d782a525c30e2c99bde5...v1.0.0) (2026-10-26)
 
 
