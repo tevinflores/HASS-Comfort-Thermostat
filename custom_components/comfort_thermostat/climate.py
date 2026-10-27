@@ -658,12 +658,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         else:
             self._out_of_band_since = None
 
-        # In AUTO preset mode, re-evaluate the real device's mode
-        if (
-            self._hvac_mode == HVACMode.AUTO
-            and self._preset_mode != PRESET_NONE
-            and not self._updating_from_control
-        ):
+        # In AUTO, re-evaluate the real device's mode.  This includes
+        # PRESET_NONE: a manual range edit drops the preset, and skipping
+        # it here froze the committed direction until a preset was picked
+        # again (#2).  _active_range() supplies the manual low/high.
+        if self._hvac_mode == HVACMode.AUTO and not self._updating_from_control:
             self.hass.async_create_task(self._async_sync_real_climate())
 
         if old_temp != new_temp:
@@ -686,12 +685,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             new_temp, self._sensor_unit(state)
         )
 
-        # In AUTO preset mode, outside temperature changes may refine the mode
-        if (
-            self._hvac_mode == HVACMode.AUTO
-            and self._preset_mode != PRESET_NONE
-            and not self._updating_from_control
-        ):
+        # In AUTO (with or without a preset), re-evaluate the real device
+        if self._hvac_mode == HVACMode.AUTO and not self._updating_from_control:
             self.hass.async_create_task(self._async_sync_real_climate())
 
     # ------------------------------------------------------------------
