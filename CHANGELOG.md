@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.3...v1.1.0) (2026-10-27)
+
+
+### Miscellaneous Chores
+
+* release 1.1.0 ([e6b19aa](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/e6b19aa3bc4bfb31d348a2ae8f68f61c1cad83a9))
+
 ## [1.0.3](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.2...v1.0.3) (2026-10-27)
 
 
