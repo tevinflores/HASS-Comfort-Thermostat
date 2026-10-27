@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.0...v1.1.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **climate:** raise minimum comfort-band width to 1.5 °C ([#6](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/6)) ([0c48324](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/0c48324a460569cf9c7e58a090c70bbdb3ad91f8))
+
 ## [1.1.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.3...v1.1.0) (2026-10-27)
 
 
