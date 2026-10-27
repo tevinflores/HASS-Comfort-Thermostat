@@ -821,6 +821,16 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         elif real_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, None, ""):
             problems.append("real_climate_unavailable")
 
+        # AUTO with no reading and no committed direction leaves the device
+        # untouched (#5).  The sensor codes above say *why*; this one says
+        # AUTO is not controlling anything yet.
+        if (
+            self._hvac_mode == HVACMode.AUTO
+            and self._auto_mode is None
+            and self._current_temperature is None
+        ):
+            problems.append("auto_waiting_for_reading")
+
         # Sustained out-of-band in AUTO.  AUTO that can't keep the room
         # in band over half-hour windows means the unit is undersized,
         # blocked, or fighting an unmet load — the user should know.
@@ -866,10 +876,15 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
         return problems
 
-    def _desired_real_mode(self) -> HVACMode:
+    def _desired_real_mode(self) -> HVACMode | None:
         """Determine which mode (HEAT/COOL/OFF) the real device should be in.
 
         For non-AUTO modes the user's choice is passed through.
+
+        Returns ``None`` in AUTO when there is no inside reading and no
+        committed direction yet: there is nothing to decide on, so the
+        device must be left alone.  Never returns ``HVACMode.AUTO`` — that
+        would hand control to the unit's own changeover logic (#5).
 
         In AUTO mode the wrapper maintains a sticky **committed direction**
         (HEAT or COOL) and just commands that direction.  No in-band
@@ -906,9 +921,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         if self._hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             return self._hvac_mode
 
-        # AUTO mode – need an inside reading to make any decision.
+        # AUTO mode – need an inside reading to make any decision.  Hold a
+        # committed direction (e.g. restored after a restart); without one,
+        # leave the device alone until a reading arrives.
         if self._current_temperature is None or math.isnan(self._current_temperature):
-            return self._auto_mode or HVACMode.AUTO
+            return self._auto_mode
 
         inside = self._current_temperature
         low, high = self._active_range()
@@ -992,6 +1009,10 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             return
 
         real_mode = self._desired_real_mode()
+        if real_mode is None:
+            # AUTO with nothing to decide on yet; reported as
+            # auto_waiting_for_reading.  The next reading re-runs this.
+            return
         # Record COOL transitions for short-cycle detection.  A "start"
         # is OFF → COOL (or None → COOL on first sync).
         if (
