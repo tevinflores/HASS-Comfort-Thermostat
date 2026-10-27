@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.1...v1.0.2) (2026-10-27)
+
+
+### Bug Fixes
+
+* **climate:** never send the unit its own AUTO mode ([cc0ec8b](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/cc0ec8b247048b15c75aa91e67fcd3555b443940)), closes [#5](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/5)
+
 ## [1.0.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.0...v1.0.1) (2026-10-27)
 
 
