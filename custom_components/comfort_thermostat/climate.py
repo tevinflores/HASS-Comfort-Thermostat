@@ -1004,10 +1004,14 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     # ------------------------------------------------------------------
 
     async def _async_sync_real_climate(self) -> None:
-        """Push the desired mode and setpoint to the real climate device."""
-        if self._updating_from_control:
-            return
+        """Push the desired mode and setpoint to the real climate device.
 
+        Not gated on ``_updating_from_control``: the control methods set
+        that flag and then call this, so gating here dropped every user
+        change (#27).  The flag is checked by the sensor callbacks instead,
+        before they schedule a sync, which is what keeps the two paths from
+        overlapping.
+        """
         real_mode = self._desired_real_mode()
         if real_mode is None:
             # AUTO with nothing to decide on yet; reported as
@@ -1157,39 +1161,43 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the HVAC mode."""
         self._updating_from_control = True
-        old_mode = self._hvac_mode
-        self._hvac_mode = hvac_mode
+        try:
+            old_mode = self._hvac_mode
+            self._hvac_mode = hvac_mode
 
-        # Leaving AUTO clears the sticky AUTO state so the next AUTO entry
-        # picks a fresh mode from current temperatures rather than reusing
-        # a stale commitment.
-        if hvac_mode != HVACMode.AUTO:
-            self._auto_mode = None
-            self._pending_flip_since = None
+            # Leaving AUTO clears the sticky AUTO state so the next AUTO entry
+            # picks a fresh mode from current temperatures rather than reusing
+            # a stale commitment.
+            if hvac_mode != HVACMode.AUTO:
+                self._auto_mode = None
+                self._pending_flip_since = None
 
-        if hvac_mode == HVACMode.OFF:
-            await self.hass.services.async_call(
-                "climate",
-                "set_hvac_mode",
-                {"entity_id": self._real_climate_id, "hvac_mode": HVACMode.OFF.value},
-                blocking=False,
-            )
-        elif hvac_mode == HVACMode.AUTO:
-            # Entering AUTO mode – reload the active preset's range
-            if self._preset_mode != PRESET_NONE:
-                low, high = self._active_range()
-                self._target_temp_low = low
-                self._target_temp_high = high
-            await self._async_sync_real_climate()
-        else:
-            # HEAT or COOL: use single target temperature
-            if old_mode == HVACMode.AUTO:
-                # Carry the preset midpoint over as the single-point target
-                self._target_temperature = self._preset_midpoint()
-            await self._async_sync_real_climate()
+            if hvac_mode == HVACMode.OFF:
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": self._real_climate_id, "hvac_mode": HVACMode.OFF.value},
+                    blocking=False,
+                )
+            elif hvac_mode == HVACMode.AUTO:
+                # Entering AUTO mode – reload the active preset's range
+                if self._preset_mode != PRESET_NONE:
+                    low, high = self._active_range()
+                    self._target_temp_low = low
+                    self._target_temp_high = high
+                await self._async_sync_real_climate()
+            else:
+                # HEAT or COOL: use single target temperature
+                if old_mode == HVACMode.AUTO:
+                    # Carry the preset midpoint over as the single-point target
+                    self._target_temperature = self._preset_midpoint()
+                await self._async_sync_real_climate()
 
-        self.async_write_ha_state()
-        self._updating_from_control = False
+            self.async_write_ha_state()
+        finally:
+            # Always clear: a stuck flag would silently block every later
+            # sensor-driven sync.
+            self._updating_from_control = False
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set the active preset, updating the temperature range accordingly.
@@ -1202,23 +1210,25 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         the previous preset's sensor.
         """
         self._updating_from_control = True
-        old_preset = self._preset_mode
-        self._preset_mode = preset_mode
+        try:
+            old_preset = self._preset_mode
+            self._preset_mode = preset_mode
 
-        # Re-seed current_temperature from the (possibly new) active sensor.
-        # Cheap and idempotent when the sensor didn't actually change.
-        if preset_mode != old_preset:
-            self._sync_from_sensors()
+            # Re-seed current_temperature from the (possibly new) active sensor.
+            # Cheap and idempotent when the sensor didn't actually change.
+            if preset_mode != old_preset:
+                self._sync_from_sensors()
 
-        if preset_mode != PRESET_NONE:
-            low, high = self._active_range()
-            self._target_temp_low = low
-            self._target_temp_high = high
-            if self._hvac_mode == HVACMode.AUTO:
-                await self._async_sync_real_climate()
+            if preset_mode != PRESET_NONE:
+                low, high = self._active_range()
+                self._target_temp_low = low
+                self._target_temp_high = high
+                if self._hvac_mode == HVACMode.AUTO:
+                    await self._async_sync_real_climate()
 
-        self.async_write_ha_state()
-        self._updating_from_control = False
+            self.async_write_ha_state()
+        finally:
+            self._updating_from_control = False
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature.
@@ -1229,43 +1239,44 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         (manual mode) because the user is directly editing setpoints.
         """
         self._updating_from_control = True
+        try:
+            # Any manual temperature edit exits preset mode
+            self._preset_mode = PRESET_NONE
 
-        # Any manual temperature edit exits preset mode
-        self._preset_mode = PRESET_NONE
-
-        if ATTR_TARGET_TEMP_LOW in kwargs or ATTR_TARGET_TEMP_HIGH in kwargs:
-            if ATTR_TARGET_TEMP_LOW in kwargs:
-                new_low = float(kwargs[ATTR_TARGET_TEMP_LOW])
-                self._target_temp_low = new_low
-            if ATTR_TARGET_TEMP_HIGH in kwargs:
-                new_high = float(kwargs[ATTR_TARGET_TEMP_HIGH])
-                self._target_temp_high = new_high
-
-            # Enforce minimum separation between low and high
-            if self._target_temp_high - self._target_temp_low < MIN_TEMP_DIFF:
+            if ATTR_TARGET_TEMP_LOW in kwargs or ATTR_TARGET_TEMP_HIGH in kwargs:
+                if ATTR_TARGET_TEMP_LOW in kwargs:
+                    new_low = float(kwargs[ATTR_TARGET_TEMP_LOW])
+                    self._target_temp_low = new_low
                 if ATTR_TARGET_TEMP_HIGH in kwargs:
-                    self._target_temp_low = self._target_temp_high - MIN_TEMP_DIFF
-                else:
-                    self._target_temp_high = self._target_temp_low + MIN_TEMP_DIFF
+                    new_high = float(kwargs[ATTR_TARGET_TEMP_HIGH])
+                    self._target_temp_high = new_high
 
-            if self._hvac_mode == HVACMode.AUTO:
-                await self._async_sync_real_climate()
+                # Enforce minimum separation between low and high
+                if self._target_temp_high - self._target_temp_low < MIN_TEMP_DIFF:
+                    if ATTR_TARGET_TEMP_HIGH in kwargs:
+                        self._target_temp_low = self._target_temp_high - MIN_TEMP_DIFF
+                    else:
+                        self._target_temp_high = self._target_temp_low + MIN_TEMP_DIFF
 
-        elif ATTR_TEMPERATURE in kwargs:
-            temp = float(kwargs[ATTR_TEMPERATURE])
-            self._target_temperature = temp
-            await self.hass.services.async_call(
-                "climate",
-                "set_temperature",
-                {
-                    "entity_id": self._real_climate_id,
-                    "temperature": self._from_celsius(temp),
-                },
-                blocking=False,
-            )
+                if self._hvac_mode == HVACMode.AUTO:
+                    await self._async_sync_real_climate()
 
-        self.async_write_ha_state()
-        self._updating_from_control = False
+            elif ATTR_TEMPERATURE in kwargs:
+                temp = float(kwargs[ATTR_TEMPERATURE])
+                self._target_temperature = temp
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_temperature",
+                    {
+                        "entity_id": self._real_climate_id,
+                        "temperature": self._from_celsius(temp),
+                    },
+                    blocking=False,
+                )
+
+            self.async_write_ha_state()
+        finally:
+            self._updating_from_control = False
 
     async def async_turn_on(self) -> None:
         """Turn on by entering AUTO mode."""
