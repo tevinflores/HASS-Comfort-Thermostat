@@ -110,7 +110,13 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   system unit here once made °F installs plot raw °C setpoints as °F.
 - `TEMP_STEP`: 0.5 °C granularity for setpoint adjustments
 - `MIN_TEMP`/`MAX_TEMP`: Absolute bounds (10–35 °C)
-- `MIN_TEMP_DIFF`: 0.5 °C minimum difference between low and high setpoints
+- `MIN_TEMP_DIFF`: 1.5 °C minimum difference between low and high setpoints
+  (#6).  The smallest width where the whole-degree device setpoint plus
+  the unit's +0.5 °C overshoot stays in band in both directions; see the
+  derivation in `const.py`.  Enforced by `_widen_band()` in
+  `async_set_temperature`, on restore, and on preset ranges loaded from
+  the config entry (older entries could be 0.5 °C wide), and by the
+  options flow's `range_too_narrow` error.
 - `FLIP_MARGIN` / `FLIP_DWELL`: how far past the comfort-band midpoint
   (in °C) and for how long (in seconds, default 30 min) the inside
   temperature must persist *against* the committed AUTO mode before
@@ -326,6 +332,8 @@ rm -rf .pytest_cache __pycache__ .coverage
   hvac_mode and setpoint; real-device state events are only mirrored as
   `hvac_action` for UI and never feed back into preset/setpoint state
 - All preset temperature ranges must respect MIN_TEMP_DIFF constraint
+- HA reads UI text from `translations/en.json`, not `strings.json`, for a
+  custom component; keep the two identical
 
 ## Smart Zones — per-preset inside sensors (v6.0.0)
 

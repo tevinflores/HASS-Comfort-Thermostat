@@ -87,6 +87,27 @@ SUPPORTED_PRESETS = [PRESET_HOME, PRESET_SLEEP, PRESET_AWAY, PRESET_NONE]
 CURRENT_TEMP_DISPLAY_DECIMALS = 2
 
 
+def _widen_band(
+    low: float, high: float, keep_high: bool = False
+) -> tuple[float, float]:
+    """Return (low, high) widened to at least MIN_TEMP_DIFF apart.
+
+    Moves ``low`` down when ``keep_high`` (the user just set high), otherwise
+    moves ``high`` up, then shifts the band back inside [MIN_TEMP, MAX_TEMP].
+    """
+    if high - low >= MIN_TEMP_DIFF:
+        return low, high
+    if keep_high:
+        low = high - MIN_TEMP_DIFF
+    else:
+        high = low + MIN_TEMP_DIFF
+    if low < MIN_TEMP:
+        low, high = MIN_TEMP, MIN_TEMP + MIN_TEMP_DIFF
+    if high > MAX_TEMP:
+        low, high = MAX_TEMP - MIN_TEMP_DIFF, MAX_TEMP
+    return low, high
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -181,6 +202,17 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                 config.get(CONF_AWAY_MAX, DEFAULT_AWAY_MAX),
             ),
         }
+        # Entries saved before #6 could hold bands as narrow as 0.5 °C,
+        # which park the room above the band (see MIN_TEMP_DIFF).  Widen
+        # them here; the options flow rejects them on the next edit.
+        for preset, (low, high) in self._preset_ranges.items():
+            widened = _widen_band(low, high)
+            if widened != (low, high):
+                _LOGGER.warning(
+                    "%s: %s range %s–%s °C is narrower than %s °C; using %s–%s °C",
+                    name, preset, low, high, MIN_TEMP_DIFF, *widened,
+                )
+                self._preset_ranges[preset] = widened
 
         # Internal state
         self._hvac_mode: HVACMode = HVACMode.OFF
@@ -483,6 +515,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         restored = self._restore_temp(attrs.get(ATTR_TARGET_TEMP_HIGH))
         if restored is not None:
             self._target_temp_high = restored
+        self._target_temp_low, self._target_temp_high = _widen_band(
+            self._target_temp_low, self._target_temp_high
+        )
         restored = self._restore_temp(attrs.get(ATTR_TEMPERATURE))
         if restored is not None:
             self._target_temperature = restored
@@ -1345,11 +1380,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                     self._target_temp_high = new_high
 
                 # Enforce minimum separation between low and high
-                if self._target_temp_high - self._target_temp_low < MIN_TEMP_DIFF:
-                    if ATTR_TARGET_TEMP_HIGH in kwargs:
-                        self._target_temp_low = self._target_temp_high - MIN_TEMP_DIFF
-                    else:
-                        self._target_temp_high = self._target_temp_low + MIN_TEMP_DIFF
+                self._target_temp_low, self._target_temp_high = _widen_band(
+                    self._target_temp_low,
+                    self._target_temp_high,
+                    keep_high=ATTR_TARGET_TEMP_HIGH in kwargs,
+                )
 
                 if self._hvac_mode == HVACMode.AUTO:
                     await self._async_sync_real_climate()

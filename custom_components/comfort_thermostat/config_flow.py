@@ -41,6 +41,7 @@ from .const import (
     DOMAIN,
     MAX_TEMP,
     MIN_TEMP,
+    MIN_TEMP_DIFF,
     TEMP_STEP,
 )
 
@@ -52,6 +53,20 @@ _PRESET_TEMP_KEYS = (
     CONF_AWAY_MIN,
     CONF_AWAY_MAX,
 )
+
+_PRESET_RANGE_KEYS = (
+    (CONF_HOME_MIN, CONF_HOME_MAX),
+    (CONF_SLEEP_MIN, CONF_SLEEP_MAX),
+    (CONF_AWAY_MIN, CONF_AWAY_MAX),
+)
+
+
+def _min_diff_display(unit: str) -> str:
+    """Return MIN_TEMP_DIFF as a temperature *difference* in ``unit``."""
+    diff = TemperatureConverter.convert_interval(
+        MIN_TEMP_DIFF, UnitOfTemperature.CELSIUS, unit
+    )
+    return f"{round(diff, 1)} {unit}"
 
 
 def _temp_selector(unit: str) -> NumberSelector:
@@ -152,13 +167,20 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
         shown and entered in the HA system unit, converted at this boundary.
         """
         unit = self.hass.config.units.temperature_unit
+        errors: dict[str, str] = {}
 
         if user_input is not None:
             data = dict(user_input)
             for key in _PRESET_TEMP_KEYS:
                 if key in data:
                     data[key] = _from_display(data[key], unit)
-            return self.async_create_entry(title="", data=data)
+            # Checked in °C after conversion; the epsilon absorbs the
+            # 2-decimal rounding in _from_display.
+            for low_key, high_key in _PRESET_RANGE_KEYS:
+                if data[high_key] - data[low_key] < MIN_TEMP_DIFF - 0.01:
+                    errors[high_key] = "range_too_narrow"
+            if not errors:
+                return self.async_create_entry(title="", data=data)
 
         current = {**self._config_entry.data, **self._config_entry.options}
 
@@ -203,5 +225,13 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
         }
 
         schema = vol.Schema({**sensor_schema, **preset_schema})
+        if errors:
+            # Re-show what the user typed, not the stored values.
+            schema = self.add_suggested_values_to_schema(schema, user_input)
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"min_diff": _min_diff_display(unit)},
+        )
