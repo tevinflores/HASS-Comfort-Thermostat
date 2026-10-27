@@ -899,6 +899,96 @@ class TestStateCallbacks:
             )
 
 
+class TestAutoWithManualRange:
+    """AUTO keeps re-evaluating after a manual range edit (issue #2).
+
+    Any ``set_temperature`` call drops the preset to NONE.  Sensor updates
+    must still drive the AUTO algorithm in that state, using the manual
+    low/high, or the committed direction is frozen until a preset is
+    picked again.
+    """
+
+    def _entity(self):
+        hass = _make_hass_mock(
+            real_climate_state=HVACMode.HEAT.value,
+            real_climate_temp=21.0,
+            inside_temp=22.0,
+            outside_temp=10.0,
+        )
+        config = {
+            CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_OUTSIDE_SENSOR: OUTSIDE_SENSOR_ID,
+        }
+        entity = _make_entity(hass, config)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_HOME
+        entity._auto_mode = HVACMode.HEAT
+        entity._unit_command = HVACMode.HEAT
+        entity._current_temperature = 22.0
+        entity.async_write_ha_state = MagicMock()
+        return entity, hass
+
+    def _set_inside(self, hass, temp: float) -> None:
+        orig_get = hass.states.get
+        new_state = MagicMock()
+        new_state.state = str(temp)
+        hass.states.get = lambda eid: new_state if eid == INSIDE_SENSOR_ID else orig_get(eid)
+
+    @pytest.mark.asyncio
+    async def test_inside_update_after_range_edit_schedules_sync(self):
+        entity, hass = self._entity()
+        await entity.async_set_temperature(target_temp_low=21.0, target_temp_high=23.0)
+        assert entity._preset_mode == PRESET_NONE
+        hass.async_create_task.reset_mock()
+
+        self._set_inside(hass, 22.4)
+        entity._on_inside_sensor_update()
+
+        hass.async_create_task.assert_called_once()
+        hass.async_create_task.call_args.args[0].close()
+
+    @pytest.mark.asyncio
+    async def test_outside_update_after_range_edit_schedules_sync(self):
+        entity, hass = self._entity()
+        await entity.async_set_temperature(target_temp_low=21.0, target_temp_high=23.0)
+        hass.async_create_task.reset_mock()
+
+        entity._on_outside_sensor_update()
+
+        hass.async_create_task.assert_called_once()
+        hass.async_create_task.call_args.args[0].close()
+
+    @pytest.mark.asyncio
+    async def test_fast_flip_still_works_after_range_edit(self):
+        """HEAT committed, manual band [21, 23], room rises past 23 → COOL."""
+        entity, hass = self._entity()
+        await entity.async_set_temperature(target_temp_low=21.0, target_temp_high=23.0)
+        hass.services.async_call.reset_mock()
+
+        self._set_inside(hass, 23.4)
+        entity._on_inside_sensor_update()
+        await hass.async_create_task.call_args.args[0]
+
+        assert entity._auto_mode == HVACMode.COOL
+        call = hass.services.async_call.call_args
+        assert call.args[1] == "set_temperature"
+        assert call.args[2]["hvac_mode"] == HVACMode.COOL.value
+        # COOL targets high - 1 of the *manual* band.
+        assert call.args[2]["temperature"] == pytest.approx(22.0)
+
+    def test_manual_heat_mode_does_not_schedule_sync(self):
+        """Outside AUTO the user drives the device; sensor ticks don't."""
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.HEAT
+        entity._preset_mode = PRESET_NONE
+
+        self._set_inside(hass, 25.0)
+        entity._on_inside_sensor_update()
+
+        hass.async_create_task.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Unit tests – mode-appropriate setpoints sent to the real device
 # ---------------------------------------------------------------------------
