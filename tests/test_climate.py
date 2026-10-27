@@ -155,13 +155,17 @@ class TestDesiredRealMode:
         entity._hvac_mode = HVACMode.COOL
         assert entity._desired_real_mode() == HVACMode.COOL
 
-    def test_auto_no_inside_sensor_no_prior_choice_returns_auto(self):
-        """Without a sensor reading and no committed mode yet, return AUTO
-        so the real device is left untouched until we actually know."""
+    def test_auto_no_inside_sensor_no_prior_choice_returns_none(self):
+        """Without a sensor reading and no committed mode yet, return None
+        so the real device is left untouched until we actually know.
+
+        Returning HVACMode.AUTO here used to be forwarded to the device as
+        ``hvac_mode: auto``, handing control to the unit's own changeover
+        logic (#5)."""
         entity = self._entity(inside=None)
         entity._current_temperature = None
         assert entity._auto_mode is None
-        assert entity._desired_real_mode() == HVACMode.AUTO
+        assert entity._desired_real_mode() is None
 
     def test_auto_no_inside_sensor_keeps_committed_mode(self):
         """If a mode was already chosen, a transient sensor outage must not
@@ -845,6 +849,7 @@ class TestStateCallbacks:
         new_state.state = "23.5"
         hass.states.get = lambda eid: new_state if eid == INSIDE_SENSOR_ID else MagicMock()
         entity._on_inside_sensor_update()
+        hass.async_create_task.call_args.args[0].close()  # AUTO sync, not under test
         assert entity._current_temperature == pytest.approx(23.5)
 
     def test_outside_sensor_update_stores_temperature(self):
@@ -860,6 +865,7 @@ class TestStateCallbacks:
 
         hass.states.get = patched_get
         entity._on_outside_sensor_update()
+        hass.async_create_task.call_args.args[0].close()  # AUTO sync, not under test
         assert entity._outside_temperature == pytest.approx(5.0)
 
     def test_real_climate_action_synced(self):
@@ -2312,6 +2318,7 @@ class TestDeadInsideSensor:
         event = MagicMock()
         event.data = {"entity_id": SLEEP_SENSOR_ID}
         entity._async_entity_state_changed(event)
+        hass.async_create_task.call_args.args[0].close()  # AUTO sync, not under test
 
         assert entity._current_temperature == pytest.approx(22.0)
 
@@ -2337,3 +2344,107 @@ class TestDeadInsideSensor:
         await entity.async_set_preset_mode(PRESET_SLEEP)
 
         assert entity._current_temperature is None
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – AUTO with no reading and no committed direction (issue #5)
+# ---------------------------------------------------------------------------
+
+class TestNoReadingNoCommand:
+    """AUTO must never send the device its own AUTO mode.
+
+    With no inside reading and no committed direction there is nothing to
+    decide on: leave the device alone, report it in ``problems``, and pick
+    a direction as soon as a reading arrives.  A committed direction (e.g.
+    restored after a restart) is still held and sent.
+    """
+
+    def _entity(self, inside_temp=None, real_state=HVACMode.OFF.value):
+        hass = _make_hass_mock(
+            real_climate_state=real_state,
+            inside_temp=inside_temp,
+        )
+        entity = _make_entity(hass)
+        entity._preset_mode = PRESET_HOME
+        entity.async_write_ha_state = MagicMock()
+        return entity, hass
+
+    @pytest.mark.asyncio
+    async def test_entering_auto_without_reading_sends_nothing(self):
+        entity, hass = self._entity()
+
+        await entity.async_set_hvac_mode(HVACMode.AUTO)
+
+        hass.services.async_call.assert_not_called()
+        assert entity._unit_command is None
+
+    @pytest.mark.asyncio
+    async def test_sync_never_sends_auto_to_device(self):
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.AUTO
+
+        await entity._async_sync_real_climate()
+
+        for call in hass.services.async_call.call_args_list:
+            assert call.args[2].get("hvac_mode") != HVACMode.AUTO.value
+
+    @pytest.mark.asyncio
+    async def test_committed_direction_still_sent_without_reading(self):
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.AUTO
+        entity._auto_mode = HVACMode.COOL
+
+        await entity._async_sync_real_climate()
+
+        call = hass.services.async_call.call_args
+        assert call.args[2]["hvac_mode"] == HVACMode.COOL.value
+
+    def test_waiting_for_reading_reported_in_problems(self):
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.AUTO
+
+        assert "auto_waiting_for_reading" in entity._detect_problems()
+
+    def test_no_waiting_problem_once_direction_committed(self):
+        entity, hass = self._entity()
+        entity._hvac_mode = HVACMode.AUTO
+        entity._auto_mode = HVACMode.HEAT
+
+        assert "auto_waiting_for_reading" not in entity._detect_problems()
+
+    @pytest.mark.asyncio
+    async def test_first_reading_picks_direction_and_commands(self):
+        entity, hass = self._entity()
+        await entity.async_set_hvac_mode(HVACMode.AUTO)
+
+        new_state = MagicMock()
+        new_state.state = "21.0"  # below the Home midpoint → HEAT
+        orig_get = hass.states.get
+        hass.states.get = lambda eid: new_state if eid == INSIDE_SENSOR_ID else orig_get(eid)
+        entity._on_inside_sensor_update()
+        await hass.async_create_task.call_args.args[0]
+
+        assert entity._auto_mode == HVACMode.HEAT
+        call = hass.services.async_call.call_args
+        assert call.args[2]["hvac_mode"] == HVACMode.HEAT.value
+
+    @pytest.mark.asyncio
+    async def test_restart_without_reading_or_commitment_sends_nothing(self):
+        hass = _make_hass_mock(inside_temp=None)
+        entity = _make_entity(hass)
+        last_state = MagicMock()
+        last_state.state = HVACMode.AUTO.value
+        last_state.attributes = {"preset_mode": PRESET_HOME}
+
+        with patch.object(
+            ComfortThermostatEntity, "async_get_last_state", return_value=last_state
+        ), patch.object(
+            ComfortThermostatEntity, "async_on_remove"
+        ), patch(
+            "custom_components.comfort_thermostat.climate.async_track_state_change_event"
+        ), patch.object(
+            ComfortThermostatEntity, "async_write_ha_state"
+        ):
+            await entity.async_added_to_hass()
+
+        hass.services.async_call.assert_not_called()

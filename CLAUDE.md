@@ -557,6 +557,7 @@ Conditions checked:
 | `inside_sensor_unavailable` / `_unknown` / `_missing` | Inside-temp sensor is unreachable | immediate |
 | `sensor_stale:Nmin` | Inside sensor hasn't updated in N minutes | `SENSOR_STALE_MINUTES` (15) |
 | `real_climate_unavailable` / `_missing` | Wrapped climate device is unreachable | immediate |
+| `auto_waiting_for_reading` | AUTO has no inside reading and no committed direction, so the device is left untouched (#5) | immediate |
 | `out_of_band:Nmin` | AUTO can't keep room in band | `OUT_OF_BAND_ALERT_MINUTES` (30) |
 | `short_cycle:N/h` | COOL starts/hour too high | `SHORT_CYCLE_THRESHOLD_PER_H` (6) |
 | `command_desync:want=X_got=Y` | Wrapper commanded `X` but real device is in `Y` past `COMMAND_GRACE_SECONDS` (60) | 60 s |
