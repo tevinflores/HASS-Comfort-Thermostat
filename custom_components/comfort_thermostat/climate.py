@@ -793,6 +793,47 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             value, UnitOfTemperature.CELSIUS, self._system_unit()
         )
 
+    def _device_setpoint(
+        self,
+        target: float,
+        mode: HVACMode,
+        low: float | None = None,
+        high: float | None = None,
+    ) -> float:
+        """Return the °C ``target`` as a whole degree in the device's unit.
+
+        Real thermostats only accept whole-degree setpoints, and their
+        advertised ``target_temp_step`` cannot be trusted to reflect that.
+        Send exactly what the device will store — otherwise it silently
+        rounds (e.g. 22.5 → 22) and every inside-sensor update drives
+        another set_temperature trying to "correct" the mismatch.
+
+        The device works in the system unit, so round there: whole °F on a
+        °F install (1 °F steps), not whole °C (1.8 °F steps, then rounded
+        again by the device) (#7).
+
+        Round directionally (up for HEAT, down for COOL).  With band-edge
+        setpoints that usually lands on the band edge itself; when it lands
+        outside the comfort band ``[low, high]``, fall back to the
+        opposite-direction whole degree inside it.
+        """
+        # Round to tenths first: °F values stored as 2-decimal °C convert
+        # back with noise (71 °F → 21.67 °C → 71.006 °F) that must not
+        # ceil up a whole degree.
+        def to_device(celsius: float) -> float:
+            return round(self._from_celsius(celsius), 1)
+
+        value = to_device(target)
+        if mode == HVACMode.HEAT:
+            value = math.ceil(value)
+            if high is not None and value > to_device(high):
+                value = math.floor(to_device(high))
+        else:  # COOL
+            value = math.floor(value)
+            if low is not None and value < to_device(low):
+                value = math.ceil(to_device(low))
+        return float(value)
+
     def _sensor_unit(self, state: State) -> str:
         """Return a sensor's temperature unit, falling back to the system unit.
 
@@ -1232,37 +1273,18 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         else:
             target_temp = self._target_temperature
 
-        # Real thermostats only accept whole-integer setpoints, and their
-        # advertised ``target_temp_step`` cannot be trusted to reflect that.
-        # Always round to an integer so the device stores exactly what we
-        # send — otherwise it silently rounds (e.g. 22.5 → 22) and every
-        # inside-sensor update drives another set_temperature call trying to
-        # "correct" the mismatch, producing target flutter.
-        # Round directionally (up for HEAT, down for COOL).  With band-edge
-        # setpoints the rounding usually lands on the integer band edge
-        # itself, but for non-integer bands we still want to stay inside the
-        # comfort band — fall back to the opposite-direction integer bound
-        # when the directional rounding lands outside it.
-        if real_mode == HVACMode.HEAT:
-            target_temp = float(math.ceil(target_temp))
-            if high is not None and target_temp > high:
-                target_temp = float(math.floor(high))
-        else:  # COOL
-            target_temp = float(math.floor(target_temp))
-            if low is not None and target_temp < low:
-                target_temp = float(math.ceil(low))
+        setpoint = self._device_setpoint(target_temp, real_mode, low, high)
 
         # The real device's attributes and its set_temperature service both
-        # use the system unit; everything above is °C.
+        # use the system unit, as does ``setpoint``.
         current_temp = real_state.attributes.get("temperature")
 
-        # Tolerance must cover the full integer step so the next sensor
-        # update doesn't trigger a spurious resend when the device is
-        # already holding the exact value we sent.
+        # Half a whole-degree step, so the next sensor update doesn't
+        # trigger a spurious resend when the device is already holding the
+        # exact value we sent.
         mode_changed = current_mode != real_mode.value
         temp_changed = (
-            current_temp is None
-            or abs(self._to_celsius(float(current_temp)) - target_temp) >= 0.5
+            current_temp is None or abs(float(current_temp) - setpoint) >= 0.5
         )
 
         if not (mode_changed or temp_changed):
@@ -1270,7 +1292,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
         service_data: dict[str, Any] = {
             "entity_id": self._real_climate_id,
-            "temperature": self._from_celsius(target_temp),
+            "temperature": setpoint,
             "hvac_mode": real_mode.value,
         }
         await self.hass.services.async_call(
@@ -1397,7 +1419,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                     "set_temperature",
                     {
                         "entity_id": self._real_climate_id,
-                        "temperature": self._from_celsius(temp),
+                        "temperature": self._device_setpoint(temp, self._hvac_mode),
                     },
                     blocking=False,
                 )

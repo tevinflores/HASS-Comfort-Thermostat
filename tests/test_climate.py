@@ -2198,7 +2198,8 @@ class TestFahrenheitSystem:
 
     @pytest.mark.asyncio
     async def test_setpoint_sent_to_real_device_in_fahrenheit(self):
-        """AUTO+HEAT on the Home preset sends low (21 °C) as 69.8 °F."""
+        """AUTO+HEAT on the Home preset sends low (21 °C = 69.8 °F) rounded
+        up to a whole °F, 70 (#7)."""
         hass = self._hass(real_climate_temp=None, inside_temp=68.0)
         entity = _make_entity(hass)
         entity._sync_from_sensors()  # 68 °F == 20 °C → HEAT
@@ -2207,9 +2208,7 @@ class TestFahrenheitSystem:
         await entity._async_sync_real_climate()
         data = hass.services.async_call.call_args[0][2]
         assert data["hvac_mode"] == HVACMode.HEAT.value
-        assert data["temperature"] == pytest.approx(
-            DEFAULT_HOME_MIN * 9 / 5 + 32
-        )
+        assert data["temperature"] == math.ceil(DEFAULT_HOME_MIN * 9 / 5 + 32)
 
     @pytest.mark.asyncio
     async def test_no_resend_when_real_device_already_at_setpoint(self):
@@ -2932,3 +2931,111 @@ class TestMinRangeWidth:
             (DEFAULT_AWAY_MIN, DEFAULT_AWAY_MAX),
         ]:
             assert high - low >= MIN_TEMP_DIFF
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – setpoints rounded in the device's unit (issue #7)
+# ---------------------------------------------------------------------------
+
+def _f(celsius: float) -> float:
+    return celsius * 9 / 5 + 32
+
+
+def _c(fahrenheit: float) -> float:
+    """°F → °C the way the options flow stores it (2 decimals)."""
+    return round((fahrenheit - 32) * 5 / 9, 2)
+
+
+class TestFahrenheitDeviceRounding:
+    """On a °F system the device takes whole °F, so setpoints are rounded
+    in °F (1 °F steps), not in °C (1.8 °F steps)."""
+
+    def _hass(self, **kwargs) -> MagicMock:
+        hass = _make_hass_mock(**kwargs)
+        hass.config.units.temperature_unit = "°F"
+        return hass
+
+    async def _sent(self, low_f, high_f, direction, real_climate_temp=None):
+        hass = self._hass(
+            real_climate_state=direction.value, real_climate_temp=real_climate_temp
+        )
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._preset_mode = PRESET_NONE
+        entity._target_temp_low = _c(low_f)
+        entity._target_temp_high = _c(high_f)
+        entity._current_temperature = (_c(low_f) + _c(high_f)) / 2.0
+        entity._auto_mode = direction
+        await entity._async_sync_real_climate()
+        if not hass.services.async_call.called:
+            return None
+        return hass.services.async_call.call_args[0][2]["temperature"]
+
+    @pytest.mark.asyncio
+    async def test_heat_sends_low_in_whole_fahrenheit(self):
+        """[70, 75] °F: HEAT sends 70 °F, not ceil(21.11 °C) = 22 °C = 71.6 °F."""
+        assert await self._sent(70, 75, HVACMode.HEAT) == 70
+
+    @pytest.mark.asyncio
+    async def test_cool_sends_high_minus_one_c_floored_in_fahrenheit(self):
+        """[70, 75] °F: COOL target is 75 °F - 1 °C = 73.2 °F → 73 °F,
+        not floor(22.89 °C) = 22 °C = 71.6 °F."""
+        assert await self._sent(70, 75, HVACMode.COOL) == 73
+
+    @pytest.mark.asyncio
+    async def test_conversion_noise_does_not_round_up_a_whole_degree(self):
+        """71 °F is stored as 21.67 °C, which converts back to 71.006 °F.
+        That must still send 71, not ceil to 72."""
+        assert await self._sent(71, 76, HVACMode.HEAT) == 71
+
+    @pytest.mark.asyncio
+    async def test_no_resend_when_device_holds_the_whole_degree(self):
+        assert await self._sent(70, 75, HVACMode.HEAT, real_climate_temp=70.0) is None
+
+    @pytest.mark.asyncio
+    async def test_resend_when_device_is_one_degree_off(self):
+        assert await self._sent(70, 75, HVACMode.HEAT, real_climate_temp=71.0) == 70
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("direction", [HVACMode.HEAT, HVACMode.COOL])
+    @pytest.mark.parametrize("low_f", [64 + 0.5 * i for i in range(12)])
+    @pytest.mark.parametrize("width_f", [2.7, 3.0, 3.5, 4.0, 5.0])
+    async def test_fahrenheit_bands_keep_unit_in_band(self, direction, low_f, width_f):
+        """Every °F band at least MIN_TEMP_DIFF wide (2.7 °F) keeps the
+        whole-°F setpoint plus the unit's +0.5 °C overshoot in band."""
+        high_f = low_f + width_f
+        sent = await self._sent(low_f, high_f, direction)
+        assert sent == int(sent)
+        overshoot_f = UNIT_OVERSHOOT * 9 / 5
+        assert low_f - 0.01 <= sent and sent + overshoot_f <= high_f + 0.01, (
+            f"[{low_f}, {high_f}] °F {direction}: unit holds "
+            f"[{sent}, {sent + overshoot_f:.1f}] °F"
+        )
+
+    @pytest.mark.asyncio
+    async def test_manual_setpoint_sent_as_whole_fahrenheit(self):
+        """The card sends 72 °F to HA, which hands us 22.222 °C.  The device
+        must get 72, not 71.99999."""
+        hass = self._hass()
+        entity = _make_entity(hass)
+        entity._hvac_mode = HVACMode.HEAT
+        entity.async_write_ha_state = MagicMock()
+
+        await entity.async_set_temperature(temperature=(72 - 32) * 5 / 9)
+
+        assert hass.services.async_call.call_args[0][2]["temperature"] == 72
+
+    @pytest.mark.asyncio
+    async def test_celsius_rounding_unchanged(self):
+        """°C systems keep whole-°C setpoints: [21, 24] HEAT 21, COOL 23."""
+        for direction, expected in [(HVACMode.HEAT, 21), (HVACMode.COOL, 23)]:
+            hass = _make_hass_mock(
+                real_climate_state=direction.value, real_climate_temp=None
+            )
+            entity = _make_entity(hass)
+            entity._hvac_mode = HVACMode.AUTO
+            entity._preset_mode = PRESET_HOME
+            entity._current_temperature = 22.0
+            entity._auto_mode = direction
+            await entity._async_sync_real_climate()
+            assert hass.services.async_call.call_args[0][2]["temperature"] == expected
