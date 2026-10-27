@@ -2448,3 +2448,101 @@ class TestNoReadingNoCommand:
             await entity.async_added_to_hass()
 
         hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – user controls reach the real device (issue #27)
+# ---------------------------------------------------------------------------
+
+class TestControlsReachDevice:
+    """Every user control must push to the real device immediately.
+
+    The control methods set ``_updating_from_control`` and then call
+    ``_async_sync_real_climate``, which used to return early on that same
+    flag — so mode, preset and range changes never reached the device
+    (AUTO caught up on the next sensor tick; manual HEAT/COOL never did).
+    """
+
+    def _entity(self, hvac_mode=HVACMode.OFF, auto_mode=None):
+        hass = _make_hass_mock(
+            real_climate_state=HVACMode.OFF.value,
+            real_climate_temp=None,
+            inside_temp=22.0,
+        )
+        entity = _make_entity(hass)
+        entity._hvac_mode = hvac_mode
+        entity._auto_mode = auto_mode
+        entity._preset_mode = PRESET_HOME
+        entity._current_temperature = 22.0
+        entity.async_write_ha_state = MagicMock()
+        return entity, hass
+
+    def _sent(self, hass) -> dict:
+        call = hass.services.async_call.call_args
+        assert call is not None, "nothing was sent to the real device"
+        assert call.args[1] == "set_temperature"
+        return call.args[2]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", [HVACMode.HEAT, HVACMode.COOL])
+    async def test_manual_mode_reaches_device(self, mode):
+        entity, hass = self._entity()
+        entity._target_temperature = 21.0
+
+        await entity.async_set_hvac_mode(mode)
+
+        sent = self._sent(hass)
+        assert sent["hvac_mode"] == mode.value
+        assert sent["temperature"] == pytest.approx(21.0)
+
+    @pytest.mark.asyncio
+    async def test_entering_auto_reaches_device(self):
+        """Inside 22.0 is below the Home midpoint (22.5) → HEAT at low."""
+        entity, hass = self._entity()
+
+        await entity.async_set_hvac_mode(HVACMode.AUTO)
+
+        sent = self._sent(hass)
+        assert sent["hvac_mode"] == HVACMode.HEAT.value
+        assert sent["temperature"] == pytest.approx(DEFAULT_HOME_MIN)
+
+    @pytest.mark.asyncio
+    async def test_preset_change_in_auto_reaches_device(self):
+        entity, hass = self._entity(HVACMode.AUTO, HVACMode.HEAT)
+
+        await entity.async_set_preset_mode(PRESET_SLEEP)
+
+        sent = self._sent(hass)
+        assert sent["hvac_mode"] == HVACMode.HEAT.value
+        assert sent["temperature"] == pytest.approx(DEFAULT_SLEEP_MIN)
+
+    @pytest.mark.asyncio
+    async def test_range_edit_in_auto_reaches_device(self):
+        entity, hass = self._entity(HVACMode.AUTO, HVACMode.HEAT)
+
+        await entity.async_set_temperature(target_temp_low=20.0, target_temp_high=23.0)
+
+        sent = self._sent(hass)
+        assert sent["hvac_mode"] == HVACMode.HEAT.value
+        assert sent["temperature"] == pytest.approx(20.0)
+
+    @pytest.mark.asyncio
+    async def test_control_flag_cleared_when_device_call_fails(self):
+        """A failing service call must not leave the control flag set —
+        that would silently block every later sensor-driven sync."""
+        entity, hass = self._entity()
+        hass.services.async_call.side_effect = RuntimeError("device rejected")
+
+        with pytest.raises(RuntimeError):
+            await entity.async_set_hvac_mode(HVACMode.HEAT)
+
+        assert entity._updating_from_control is False
+
+    def test_sensor_tick_suppressed_while_control_in_flight(self):
+        """The callback-side guard against overlapping syncs stays."""
+        entity, hass = self._entity(HVACMode.AUTO, HVACMode.HEAT)
+        entity._updating_from_control = True
+
+        entity._on_inside_sensor_update()
+
+        hass.async_create_task.assert_not_called()
