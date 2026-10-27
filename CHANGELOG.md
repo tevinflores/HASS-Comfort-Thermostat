@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.2...v1.0.3) (2026-10-27)
+
+
+### Bug Fixes
+
+* **climate:** confirm fast-flips and space AUTO changeovers ([63a5774](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/63a57747346e9f400dca9ee0e3ce4140806edcee)), closes [#3](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/3)
+
 ## [1.0.2](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.0.1...v1.0.2) (2026-10-27)
 
 
