@@ -108,6 +108,12 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   `current_temperature` override in `state_attributes`, and restored
   attributes — go through `_to_celsius` / `_from_celsius`.  Returning the
   system unit here once made °F installs plot raw °C setpoints as °F.
+- Setpoints sent to the real device are **whole degrees in the system
+  unit** (`_device_setpoint`, #7): whole °F on a °F install, not whole °C
+  converted to 71.6 °F.  Rounding is directional (HEAT up, COOL down) with
+  an in-band fallback, and the converted value is rounded to tenths first
+  so 2-decimal °C storage noise (71 °F → 21.67 °C → 71.006 °F) can't ceil
+  up a degree.  The no-resend tolerance is half a step in that unit.
 - `TEMP_STEP`: 0.5 °C granularity for setpoint adjustments
 - `MIN_TEMP`/`MAX_TEMP`: Absolute bounds (10–35 °C)
 - `MIN_TEMP_DIFF`: 1.5 °C minimum difference between low and high setpoints
