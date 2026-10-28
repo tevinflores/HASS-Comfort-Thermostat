@@ -336,7 +336,9 @@ rm -rf .pytest_cache __pycache__ .coverage
 - The real climate device's setpoint in AUTO is asymmetric: `low` for HEAT, `high - 1` for COOL (corrected from v4.0.0's `high` after live observation showed unit overshoot is positive-only, not symmetric). Critical invariant.
 - Master/slave (since #43): comfort thermostat is the sole writer of the real device's
   hvac_mode and setpoint; real-device state events are only mirrored as
-  `hvac_action` for UI and never feed back into preset/setpoint state
+  `hvac_action` for UI and never feed back into preset/setpoint state.
+  Since #8 they also trigger re-sending our command when the device
+  drifts — the device is corrected, never the wrapper
 - All preset temperature ranges must respect MIN_TEMP_DIFF constraint
 - HA reads UI text from `translations/en.json`, not `strings.json`, for a
   custom component; keep the two identical
@@ -602,6 +604,20 @@ a `set_hvac_mode` call dropped during a real-device unavailability,
 or the real device deciding for itself.  Only the *change* of
 `_unit_command` resets the grace window; re-issuing the same command
 does not.
+
+**Drift correction (#8).**  `_on_real_climate_update` compares the
+device against `_unit_command` and `_unit_setpoint` (the whole-degree
+setpoint in the device's unit; `None` for OFF):
+
+- Device back from unavailable (power blip) → re-sync immediately.
+- Any other mismatch (IR remote, dropped command) → re-check after
+  `COMMAND_GRACE_SECONDS`; if it persists, re-send.  A pending re-check
+  isn't pushed out by later events.
+- At most `MAX_DRIFT_RESENDS` (3) re-sends in a row, then a log warning
+  and `command_desync` in `problems`.  The count resets when the device
+  matches or the command changes.
+- Nothing is enforced before the first command, and OFF is enforced like
+  any other mode.
 
 ### State-machine persistence
 
