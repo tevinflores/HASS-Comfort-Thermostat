@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.1...v1.1.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **climate:** round device setpoints to whole degrees in the system unit ([3884f9f](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/3884f9ff8108b9dcdd9f61a1c81f5d7e5118cf2a)), closes [#7](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/7)
+
 ## [1.1.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.0...v1.1.1) (2026-10-27)
 
 
