@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.3...v1.1.4) (2026-10-29)
+
+
+### Bug Fixes
+
+* **climate:** count real compressor starts for short_cycle ([#44](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/44)) ([2a462a2](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/2a462a21beeba2fe264613d18ce6371955f6acf9))
+
 ## [1.1.3](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.2...v1.1.3) (2026-10-29)
 
 
