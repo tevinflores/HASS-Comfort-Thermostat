@@ -1450,7 +1450,7 @@ class TestProblemDetection:
         now = entity._now()
         # SHORT_CYCLE_THRESHOLD_PER_H starts in the last hour: not over.
         for i in range(SHORT_CYCLE_THRESHOLD_PER_H):
-            entity._cool_start_times.append(
+            entity._compressor_starts.append(
                 now - datetime.timedelta(minutes=i * 5)
             )
         assert all(not p.startswith("short_cycle") for p in entity._detect_problems())
@@ -1460,7 +1460,7 @@ class TestProblemDetection:
         now = entity._now()
         # SHORT_CYCLE_THRESHOLD_PER_H + 2 starts in the last hour: over.
         for i in range(SHORT_CYCLE_THRESHOLD_PER_H + 2):
-            entity._cool_start_times.append(
+            entity._compressor_starts.append(
                 now - datetime.timedelta(minutes=i * 3)
             )
         problems = entity._detect_problems()
@@ -1472,12 +1472,12 @@ class TestProblemDetection:
         now = entity._now()
         # 5 starts > 1h ago — should not count.
         for i in range(5):
-            entity._cool_start_times.append(
+            entity._compressor_starts.append(
                 now - datetime.timedelta(hours=2, minutes=i)
             )
         # 2 starts in the last hour — well under threshold.
         for i in range(2):
-            entity._cool_start_times.append(
+            entity._compressor_starts.append(
                 now - datetime.timedelta(minutes=i * 5)
             )
         assert all(not p.startswith("short_cycle") for p in entity._detect_problems())
@@ -1540,6 +1540,117 @@ class TestProblemDetection:
         entity._unit_command = HVACMode.COOL
         entity._unit_command_at = entity._now() - datetime.timedelta(minutes=5)
         assert all(not p.startswith("command_desync") for p in entity._detect_problems())
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – short-cycle detector counts real compressor starts (issue #8)
+# ---------------------------------------------------------------------------
+
+class TestCompressorStarts:
+    """`short_cycle` counts the real device's ``hvac_action`` going into
+    heating or cooling.  Counting the wrapper's commands to COOL stopped
+    working when v5.0.0 removed deliberate-OFF: the command hardly ever
+    changes, while the unit cycles on its own."""
+
+    def _entity(self, mode=HVACMode.COOL, device_state="cool", action="idle"):
+        hass = _make_hass_mock()
+        device = {"state": device_state, "action": action}
+
+        def _get(entity_id):
+            if entity_id != REAL_CLIMATE_ID:
+                return None
+            state = MagicMock()
+            state.state = device["state"]
+            state.attributes = {"hvac_action": device["action"], "temperature": 22.0}
+            return state
+
+        hass.states.get = _get
+        entity = _make_entity(hass)
+        entity._hvac_mode = mode
+        entity.async_write_ha_state = MagicMock()
+        entity._now, self.advance = _fake_clock()
+        entity._sync_from_real_climate()
+        return entity, device
+
+    def _action(self, entity, device, action):
+        device["action"] = action
+        entity._on_real_climate_update()
+
+    def _cycles(self, entity, device, n, running="cooling", minutes=5):
+        for _ in range(n):
+            self._action(entity, device, running)
+            self.advance(minutes * 30)
+            self._action(entity, device, "idle")
+            self.advance(minutes * 30)
+
+    def _short_cycle(self, entity):
+        return [p for p in entity._detect_problems() if p.startswith("short_cycle")]
+
+    @pytest.mark.parametrize("running", ["cooling", "heating"])
+    def test_idle_to_running_is_a_start(self, running):
+        entity, device = self._entity(device_state=running[:4])
+        self._action(entity, device, running)
+        assert len(entity._compressor_starts) == 1
+
+    def test_unit_cycling_on_its_own_is_reported(self):
+        """Manual COOL, the wrapper's command never changes, the unit
+        starts every 5 minutes."""
+        entity, device = self._entity()
+        self._cycles(entity, device, SHORT_CYCLE_THRESHOLD_PER_H + 2)
+        assert self._short_cycle(entity) == [f"short_cycle:{SHORT_CYCLE_THRESHOLD_PER_H + 2}/h"]
+
+    def test_heat_short_cycling_is_reported(self):
+        entity, device = self._entity(mode=HVACMode.HEAT, device_state="heat")
+        self._cycles(entity, device, SHORT_CYCLE_THRESHOLD_PER_H + 1, running="heating")
+        assert self._short_cycle(entity)
+
+    def test_long_cycles_are_not_reported(self):
+        entity, device = self._entity()
+        self._cycles(entity, device, SHORT_CYCLE_THRESHOLD_PER_H + 2, minutes=20)
+        assert not self._short_cycle(entity)
+
+    def test_repeated_running_events_count_once(self):
+        """Attribute updates while the compressor runs aren't new starts."""
+        entity, device = self._entity()
+        for _ in range(5):
+            self._action(entity, device, "cooling")
+        assert len(entity._compressor_starts) == 1
+
+    @pytest.mark.parametrize("stopped", ["idle", "off", "fan"])
+    def test_any_stopped_action_then_running_is_a_start(self, stopped):
+        entity, device = self._entity(action="cooling")
+        self._action(entity, device, stopped)
+        self._action(entity, device, "cooling")
+        assert len(entity._compressor_starts) == 1
+
+    def test_defrost_is_not_a_start(self):
+        """A heat pump's defrost interrupts heating without stopping the
+        compressor."""
+        entity, device = self._entity(mode=HVACMode.HEAT, device_state="heat", action="heating")
+        self._action(entity, device, "defrosting")
+        self._action(entity, device, "heating")
+        assert len(entity._compressor_starts) == 0
+
+    def test_running_at_startup_is_not_a_start(self):
+        entity, device = self._entity(action="cooling")
+        self._action(entity, device, "cooling")
+        assert len(entity._compressor_starts) == 0
+
+    def test_unavailable_gap_is_not_a_start(self):
+        entity, device = self._entity(action="cooling")
+        device["state"] = "unavailable"
+        entity._on_real_climate_update()
+        device["state"] = "cool"
+        self._action(entity, device, "cooling")
+        assert len(entity._compressor_starts) == 0
+
+    @pytest.mark.asyncio
+    async def test_command_alone_is_not_a_start(self):
+        """Telling the unit to COOL doesn't start the compressor; the
+        unit reporting cooling does."""
+        entity, device = self._entity(mode=HVACMode.OFF, device_state="off")
+        await entity.async_set_hvac_mode(HVACMode.COOL)
+        assert len(entity._compressor_starts) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -2201,7 +2312,7 @@ class TestFahrenheitSystem:
     @pytest.mark.asyncio
     async def test_setpoint_sent_to_real_device_in_fahrenheit(self):
         """AUTO+HEAT on the Home preset sends low (21 °C = 69.8 °F) rounded
-        up to a whole °F, 70 (#7)."""
+        up to a whole °F, 70 (#9)."""
         hass = self._hass(real_climate_temp=None, inside_temp=68.0)
         entity = _make_entity(hass)
         entity._sync_from_sensors()  # 68 °F == 20 °C → HEAT
@@ -2936,7 +3047,7 @@ class TestMinRangeWidth:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests – setpoints rounded in the device's unit (issue #7)
+# Unit tests – setpoints rounded in the device's unit (issue #9)
 # ---------------------------------------------------------------------------
 
 def _f(celsius: float) -> float:
@@ -3044,7 +3155,7 @@ class TestFahrenheitDeviceRounding:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests – re-send commands when the device drifts (issue #8)
+# Unit tests – re-send commands when the device drifts (issue #7)
 # ---------------------------------------------------------------------------
 
 class TestResendOnDrift:

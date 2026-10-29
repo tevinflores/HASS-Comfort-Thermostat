@@ -95,7 +95,7 @@ INSIDE_TEMP_PLAUSIBLE_MAX = 45.0
 # generously so transient blips don't fire false alarms; tune down if
 # false-negatives matter more than false-alarms in a given deployment.
 OUT_OF_BAND_ALERT_MINUTES   = 30   # sustained outside [low, high] in AUTO
-SHORT_CYCLE_THRESHOLD_PER_H = 6    # COOL starts/hour above this is "too much"
+SHORT_CYCLE_THRESHOLD_PER_H = 6    # compressor starts/hour above this is "too much"
 SENSOR_STALE_MINUTES        = 15   # no inside-temp update for this long
 
 # Command-desync detection: how long we wait for the real device to
@@ -110,5 +110,5 @@ COMMAND_GRACE_SECONDS       = 60
 # COMMAND_GRACE_SECONDS (power blip, IR remote, dropped command), the
 # command is re-sent — at most this many times in a row, so a device that
 # refuses a mode isn't spammed.  The count resets once the device matches
-# or the wrapper's command changes; command_desync stays in `problems` (#8).
+# or the wrapper's command changes; command_desync stays in `problems` (#7).
 MAX_DRIFT_RESENDS           = 3

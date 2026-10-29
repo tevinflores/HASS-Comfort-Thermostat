@@ -197,5 +197,5 @@ All thresholds live in [`const.py`](../custom_components/comfort_thermostat/cons
 | `FLIP_DWELL` | 1800 s (30 min) | Sustained-excursion threshold for dwell-flip |
 | `COOL_RESTART_OFFSET` | 0.75 °C | Above mid where COOL restarts (lead the high edge) |
 | `OUT_OF_BAND_ALERT_MINUTES` | 30 | When AUTO can't keep room in band |
-| `SHORT_CYCLE_THRESHOLD_PER_H` | 6 | COOL starts/h above this is a problem |
+| `SHORT_CYCLE_THRESHOLD_PER_H` | 6 | Compressor starts/h above this is a problem |
 | `SENSOR_STALE_MINUTES` | 15 | Inside-sensor freshness threshold |

@@ -85,6 +85,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # Presets offered to the user (HA standard preset constants)
 SUPPORTED_PRESETS = [PRESET_HOME, PRESET_SLEEP, PRESET_AWAY, PRESET_NONE]
+
+# Real-device actions that count as a compressor start when entered from a
+# stopped one (#8), and the actions during which the compressor is running.
+# Defrost reverses the cycle without stopping, so heating → defrosting →
+# heating is not a start.
+_STARTS = (HVACAction.HEATING, HVACAction.COOLING)
+_RUNNING = (*_STARTS, HVACAction.DEFROSTING, HVACAction.DRYING)
 CURRENT_TEMP_DISPLAY_DECIMALS = 2
 
 
@@ -271,7 +278,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # for OFF.  Together they are what the real device should show.
         self._unit_setpoint: float | None = None
 
-        # Drift re-send (#8): a pending re-check while the real device
+        # Drift re-send (#7): a pending re-check while the real device
         # doesn't match `_unit_command` / `_unit_setpoint`, how many
         # re-sends in a row it has taken, and whether the device was
         # available at the last event (to catch it coming back).
@@ -291,7 +298,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # Problem-detection state (surfaced via `problems` attribute).
         # Updated by sensor / sync callbacks; checked at attribute read.
         self._out_of_band_since: datetime.datetime | None = None
-        self._cool_start_times: collections.deque[datetime.datetime] = (
+        # When the real device's hvac_action last went into heating or
+        # cooling (#8); counted over the trailing hour for short_cycle.
+        self._compressor_starts: collections.deque[datetime.datetime] = (
             collections.deque(maxlen=20)
         )
 
@@ -715,7 +724,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         Real-device state-change events never feed back into that state:
         they surface the current action (heating / cooling / idle / off) in
         the frontend, and re-send our command when the device stops
-        matching it (#8).
+        matching it (#7).
         """
         state = self.hass.states.get(self._real_climate_id)
         available = self._is_available(state)
@@ -737,6 +746,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             return
 
         if self._hvac_action != new_action:
+            if (
+                new_action in _STARTS
+                and self._hvac_action not in _RUNNING
+            ):
+                self._compressor_starts.append(self._now())
             self._hvac_action = new_action
             self.async_write_ha_state()
 
@@ -842,7 +856,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
         The device works in the system unit, so round there: whole °F on a
         °F install (1 °F steps), not whole °C (1.8 °F steps, then rounded
-        again by the device) (#7).
+        again by the device) (#9).
 
         Round directionally (up for HEAT, down for COOL).  With band-edge
         setpoints that usually lands on the band edge itself; when it lands
@@ -902,7 +916,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         - inside-sensor stale (no update for SENSOR_STALE_MINUTES)
         - real climate device unavailable
         - sustained out-of-band temperature in AUTO
-        - COOL short-cycling (more than SHORT_CYCLE_THRESHOLD_PER_H starts/h)
+        - short-cycling (more than SHORT_CYCLE_THRESHOLD_PER_H compressor
+          starts/h)
 
         Each problem is a short string code with optional context, e.g.
         ``out_of_band:42min``, ``short_cycle:8/h``, ``sensor_stale:18min``.
@@ -992,11 +1007,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             if duration > OUT_OF_BAND_ALERT_MINUTES:
                 problems.append(f"out_of_band:{int(duration)}min")
 
-        # Short cycling.  Count COOL starts in the trailing hour; if it's
-        # over the threshold the wrapper is flicking the compressor too
-        # hard, likely from sensor jitter near the band edge.
+        # Short cycling.  Count the real device's compressor starts (heat
+        # or cool) in the trailing hour.  The unit cycles on its own while
+        # the wrapper's command stays put, so commands can't show this.
         one_hour_ago = now - datetime.timedelta(hours=1)
-        recent = sum(1 for t in self._cool_start_times if t > one_hour_ago)
+        recent = sum(1 for t in self._compressor_starts if t > one_hour_ago)
         if recent > SHORT_CYCLE_THRESHOLD_PER_H:
             problems.append(f"short_cycle:{recent}/h")
 
@@ -1199,7 +1214,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             self.hass.async_create_task(self._async_sync_real_climate())
 
     # ------------------------------------------------------------------
-    # Drift correction (#8)
+    # Drift correction (#7)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1328,13 +1343,6 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             # AUTO with nothing to decide on yet; reported as
             # auto_waiting_for_reading.  The next reading re-runs this.
             return
-        # Record COOL transitions for short-cycle detection.  A "start"
-        # is OFF → COOL (or None → COOL on first sync).
-        if (
-            real_mode == HVACMode.COOL
-            and self._unit_command != HVACMode.COOL
-        ):
-            self._cool_start_times.append(self._now())
         # Track command changes for desync detection (only when the
         # command actually changes — re-issuing the same command
         # shouldn't reset the grace window).
@@ -1579,7 +1587,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                 self._target_temperature = temp
                 setpoint = self._device_setpoint(temp, self._hvac_mode)
                 if self._hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
-                    # So drift correction (#8) expects the new value.
+                    # So drift correction (#7) expects the new value.
                     self._unit_setpoint = setpoint
                 await self.hass.services.async_call(
                     "climate",
