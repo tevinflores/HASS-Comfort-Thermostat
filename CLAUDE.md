@@ -130,6 +130,13 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
 - `FAST_FLIP_CONFIRM` (3 min) / `MIN_CHANGEOVER_INTERVAL` (10 min): how
   long a band-edge violation must hold before the fast-flip fires, and
   the minimum spacing between AUTO changeovers (#3).
+- `MIN_OFF_TIME` (5 min): after the wrapper commands OFF, HEAT/COOL is
+  held until this has passed, then sent by a self-scheduled re-check
+  (#31).  OFF itself is never delayed, and there is no minimum run time:
+  AUTO never sends OFF, so every OFF is a user's or automation's request.
+  `_unit_command` stays OFF while held, so desync and drift correction
+  keep expecting OFF.  All OFFs go through `_async_sync_real_climate`;
+  sending one directly used to leave `_unit_command` stale.
 - `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` (0–45 °C): inside readings
   outside this range count as no reading (#3).
 
@@ -591,6 +598,7 @@ Conditions checked:
 | `sensor_stale:Nmin` | Inside sensor hasn't updated in N minutes | `SENSOR_STALE_MINUTES` (15) |
 | `real_climate_unavailable` / `_missing` | Wrapped climate device is unreachable | immediate |
 | `auto_waiting_for_reading` | AUTO has no inside reading and no committed direction, so the device is left untouched (#5) | immediate |
+| `min_off_time_wait:Ns` | A HEAT/COOL is held back for N more seconds by `MIN_OFF_TIME` after an OFF (#31) | immediate |
 | `out_of_band:Nmin` | AUTO can't keep room in band | `OUT_OF_BAND_ALERT_MINUTES` (30) |
 | `short_cycle:N/h` | Real compressor starts (heat or cool) per hour too high (#8) | `SHORT_CYCLE_THRESHOLD_PER_H` (6) |
 | `command_desync:want=X_got=Y` | Wrapper commanded `X` but real device is in `Y` past `COMMAND_GRACE_SECONDS` (60) | 60 s |
@@ -650,12 +658,13 @@ a room that was actually at 22.7 °C.  Persisted state means we keep
 the previously-correct commitment instead of guessing again.
 
 `_pending_flip_since`, `_fast_flip_since`, `_last_changeover_at`,
-`_out_of_band_since`, and `_compressor_starts` are *not* persisted —
-they re-arm naturally from sensor data and the worst-case latency on
-each is acceptable (`FLIP_DWELL` 30 min, `FAST_FLIP_CONFIRM` 3 min,
-`OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).  Losing
-`_last_changeover_at` only means the first changeover after a restart
-isn't spaced from the last one before it.
+`_off_since`, `_out_of_band_since`, and `_compressor_starts` are *not*
+persisted — they re-arm naturally from sensor data and the worst-case
+latency on each is acceptable (`FLIP_DWELL` 30 min, `FAST_FLIP_CONFIRM`
+3 min, `OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).
+Losing `_last_changeover_at` only means the first changeover after a
+restart isn't spaced from the last one before it; losing `_off_since`
+means a restart isn't held after an OFF from before the restart.
 
 ## Future Work — Mode-flip transition OFF (not implemented)
 

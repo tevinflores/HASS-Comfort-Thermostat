@@ -44,6 +44,7 @@ from custom_components.comfort_thermostat.const import (
     MAX_DRIFT_RESENDS,
     MAX_TEMP,
     MIN_CHANGEOVER_INTERVAL,
+    MIN_OFF_TIME,
     MIN_TEMP,
     MIN_TEMP_DIFF,
     OUT_OF_BAND_ALERT_MINUTES,
@@ -3465,6 +3466,180 @@ class TestResendOnDrift:
         cancel = MagicMock()
         device["state"] = "cool"
         self._event(entity, call_later_return=cancel)
+
+        await entity.async_will_remove_from_hass()
+
+        cancel.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – minimum off-time before restarting the compressor (issue #31)
+# ---------------------------------------------------------------------------
+
+class TestMinOffTime:
+    """After the wrapper turns the unit OFF, HEAT/COOL is held until
+    MIN_OFF_TIME has passed, then sent by a self-scheduled re-check.  OFF
+    itself always goes straight through."""
+
+    CALL_LATER = "custom_components.comfort_thermostat.climate.async_call_later"
+
+    async def _entity(self, mode=HVACMode.HEAT):
+        hass = _make_hass_mock()
+        device = {"state": mode.value}
+
+        def _get(entity_id):
+            if entity_id != REAL_CLIMATE_ID:
+                return None
+            state = MagicMock()
+            state.state = device["state"]
+            state.attributes = {"hvac_action": None, "temperature": 22.0}
+            return state
+
+        hass.states.get = _get
+        entity = _make_entity(hass)
+        entity._hvac_mode = mode
+        entity._target_temperature = 22.0
+        entity._current_temperature = 22.0
+        entity.async_write_ha_state = MagicMock()
+        entity._now, self.advance = _fake_clock()
+        entity._sync_from_real_climate()
+        await entity._async_sync_real_climate()
+        hass.services.async_call.reset_mock()
+        return entity, hass, device
+
+    async def _turn_off(self, entity, hass, device):
+        await entity.async_set_hvac_mode(HVACMode.OFF)
+        device["state"] = "off"
+        hass.services.async_call.reset_mock()
+
+    async def _set_mode(self, entity, mode):
+        """Set the mode; return the async_call_later mock."""
+        with patch(self.CALL_LATER, return_value=MagicMock()) as call_later:
+            await entity.async_set_hvac_mode(mode)
+        return call_later
+
+    async def _fire(self, entity, hass, call_later):
+        hass.async_create_task.reset_mock()
+        self.advance(call_later.call_args.args[1])
+        call_later.call_args.args[2](None)
+        if hass.async_create_task.called:
+            await hass.async_create_task.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_off_is_sent_immediately(self):
+        entity, hass, device = await self._entity()
+        await entity.async_set_hvac_mode(HVACMode.OFF)
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_turning_off_is_not_reported_as_desync(self):
+        """Turning the thermostat OFF used to leave the last command at
+        HEAT, so `problems` reported command_desync:want=heat_got=off."""
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        self.advance(COMMAND_GRACE_SECONDS + 60)
+
+        assert entity._unit_command == HVACMode.OFF
+        assert not [p for p in entity._detect_problems() if p.startswith("command_desync")]
+
+    @pytest.mark.asyncio
+    async def test_restart_is_held_within_min_off_time(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        self.advance(60)
+
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+
+        hass.services.async_call.assert_not_called()
+        assert call_later.call_args.args[1] == MIN_OFF_TIME - 60
+
+    @pytest.mark.asyncio
+    async def test_held_command_is_sent_when_off_time_ends(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+
+        await self._fire(entity, hass, call_later)
+
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "cool"
+
+    @pytest.mark.asyncio
+    async def test_restart_after_min_off_time_is_immediate(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        self.advance(MIN_OFF_TIME)
+
+        call_later = await self._set_mode(entity, HVACMode.HEAT)
+
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "heat"
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_entering_auto_is_held_too(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+
+        call_later = await self._set_mode(entity, HVACMode.AUTO)
+
+        hass.services.async_call.assert_not_called()
+        assert call_later.called
+
+    @pytest.mark.asyncio
+    async def test_back_to_off_during_hold_sends_nothing(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        call_later = await self._set_mode(entity, HVACMode.HEAT)
+        await entity.async_set_hvac_mode(HVACMode.OFF)
+
+        await self._fire(entity, hass, call_later)
+
+        hass.services.async_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hold_is_reported_in_problems(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        self.advance(60)
+        await self._set_mode(entity, HVACMode.HEAT)
+
+        problems = entity._detect_problems()
+
+        assert f"min_off_time_wait:{MIN_OFF_TIME - 60}s" in problems
+        assert not [p for p in problems if p.startswith("command_desync")]
+
+    @pytest.mark.asyncio
+    async def test_drift_check_does_not_bypass_hold(self):
+        """The unit is off as last commanded, so a state event during the
+        hold is not drift."""
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        await self._set_mode(entity, HVACMode.HEAT)
+
+        with patch(self.CALL_LATER) as call_later:
+            entity._on_real_climate_update()
+
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_no_hold_without_a_known_off(self):
+        """After a restart the off-time isn't known (not persisted), so a
+        command isn't held."""
+        entity, hass, device = await self._entity(mode=HVACMode.OFF)
+        entity._unit_command = HVACMode.OFF
+        entity._off_since = None
+
+        call_later = await self._set_mode(entity, HVACMode.HEAT)
+
+        assert hass.services.async_call.called
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_removal_cancels_pending_restart(self):
+        entity, hass, device = await self._entity()
+        await self._turn_off(entity, hass, device)
+        cancel = MagicMock()
+        with patch(self.CALL_LATER, return_value=cancel):
+            await entity.async_set_hvac_mode(HVACMode.HEAT)
 
         await entity.async_will_remove_from_hass()
 

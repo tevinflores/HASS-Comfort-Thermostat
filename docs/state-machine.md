@@ -167,6 +167,7 @@ All thresholds live in [`const.py`](../custom_components/comfort_thermostat/cons
 | `FLIP_DWELL` | 1800 s (30 min) | Sustained-excursion threshold for dwell-flip |
 | `FAST_FLIP_CONFIRM` | 180 s (3 min) | How long a band-edge violation must hold before fast-flip |
 | `MIN_CHANGEOVER_INTERVAL` | 600 s (10 min) | Minimum spacing between AUTO changeovers; also how long a remote-set mode runs before it's undone |
+| `MIN_OFF_TIME` | 300 s (5 min) | After the thermostat turns the unit OFF, how long before HEAT/COOL can start it again |
 | `MIN_TEMP_DIFF` | 1.5 °C | Narrowest allowed comfort band |
 | `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` | 0 / 45 °C | Inside readings outside this range count as no reading |
 | `COMMAND_GRACE_SECONDS` | 60 | Time for the device to follow a command before desync / re-send |
