@@ -106,6 +106,10 @@ the mode quickly can't restart the compressor straight away.  A held start
 shows up in `problems` as `min_off_time_wait:<seconds>s` and is sent
 automatically when the wait ends.  Turning OFF is never delayed.
 
+Switching between heating and cooling (an AUTO changeover or your own
+HEAT↔COOL change) turns the unit OFF for 1 minute first, so the compressor
+spins down and the refrigerant pressures settle before the unit reverses.
+
 ### External changes
 
 The thermostat is the only thing that should control the real device's mode

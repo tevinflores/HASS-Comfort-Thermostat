@@ -76,6 +76,7 @@ from .const import (
     MIN_OFF_TIME,
     MIN_TEMP,
     MIN_TEMP_DIFF,
+    OFF_SETTLE,
     OUT_OF_BAND_ALERT_MINUTES,
     SENSOR_STALE_MINUTES,
     SHORT_CYCLE_THRESHOLD_PER_H,
@@ -93,6 +94,9 @@ SUPPORTED_PRESETS = [PRESET_HOME, PRESET_SLEEP, PRESET_AWAY, PRESET_NONE]
 # heating is not a start.
 _STARTS = (HVACAction.HEATING, HVACAction.COOLING)
 _RUNNING = (*_STARTS, HVACAction.DEFROSTING, HVACAction.DRYING)
+
+# Modes between which a changeover pauses in OFF (#11).
+_HEAT_COOL = (HVACMode.HEAT, HVACMode.COOL)
 CURRENT_TEMP_DISPLAY_DECIMALS = 2
 
 
@@ -296,10 +300,12 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         self._foreign_mode: str | None = None
         self._foreign_since: datetime.datetime | None = None
 
-        # Minimum off-time (#31): when the wrapper last commanded OFF, and
-        # the pending re-check that sends a HEAT/COOL held back until
-        # MIN_OFF_TIME has passed.  Not persisted, like the other timers.
+        # Minimum off-time (#31): when the wrapper last commanded OFF, how
+        # long that OFF must last (MIN_OFF_TIME, or OFF_SETTLE for a
+        # changeover pause, #11), and the pending re-check that sends the
+        # held HEAT/COOL.  Not persisted, like the other timers.
         self._off_since: datetime.datetime | None = None
+        self._off_hold: float = MIN_OFF_TIME
         self._off_recheck_unsub: CALLBACK_TYPE | None = None
 
         # Problem-detection state (surfaced via `problems` attribute).
@@ -1002,8 +1008,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             problems.append("auto_waiting_for_reading")
 
         # A HEAT/COOL held back by the minimum off-time (#31), so it's
-        # clear why the unit hasn't started yet.
-        if self._off_recheck_unsub is not None:
+        # clear why the unit hasn't started yet.  The 1-min changeover
+        # pause (#11) is routine and not reported.
+        if self._off_recheck_unsub is not None and self._off_hold == MIN_OFF_TIME:
             wait = self._min_off_wait()
             if wait > 0:
                 problems.append(f"min_off_time_wait:{math.ceil(wait)}s")
@@ -1337,11 +1344,11 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     # ------------------------------------------------------------------
 
     def _min_off_wait(self) -> float:
-        """Seconds until MIN_OFF_TIME allows HEAT/COOL after our OFF."""
+        """Seconds until HEAT/COOL may be sent after our OFF."""
         if self._off_since is None:
             return 0.0
         elapsed = (self._now() - self._off_since).total_seconds()
-        return max(0.0, MIN_OFF_TIME - elapsed)
+        return max(0.0, self._off_hold - elapsed)
 
     def _cancel_off_recheck(self) -> None:
         if self._off_recheck_unsub is not None:
@@ -1383,6 +1390,29 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                     self.hass, wait, self._async_off_recheck
                 )
                 return
+        if real_mode == HVACMode.OFF:
+            # The user's OFF gets the full off-time, even when it lands
+            # during a changeover pause.
+            self._off_hold = MIN_OFF_TIME
+
+        real_state = self.hass.states.get(self._real_climate_id)
+        if (
+            real_mode != self._unit_command
+            and real_mode in _HEAT_COOL
+            and real_state is not None
+            and real_state.state in _HEAT_COOL
+            and real_state.state != real_mode
+        ):
+            # HEAT↔COOL with the device running the old mode: stop it first
+            # and send the new mode after OFF_SETTLE (#11).  Keyed on the
+            # device's mode, not our last command, so it holds after a
+            # restart and is skipped when the device is already off.
+            real_mode = HVACMode.OFF
+            self._off_hold = OFF_SETTLE
+            self._off_recheck_unsub = async_call_later(
+                self.hass, OFF_SETTLE, self._async_off_recheck
+            )
+
         # Track command changes for desync detection (only when the
         # command actually changes — re-issuing the same command
         # shouldn't reset the grace window).
@@ -1396,7 +1426,6 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                 self._off_since = self._now()
         self._unit_command = real_mode
 
-        real_state = self.hass.states.get(self._real_climate_id)
         if real_state is None:
             return
 

@@ -71,8 +71,8 @@ FAST_FLIP_CONFIRM = 180  # 3 min
 
 # Minimum spacing between AUTO's own HEAT↔COOL changeovers (fast or dwell),
 # so the wrapper can't ping-pong the reversing valve.  The initial pick and
-# the user's explicit mode changes are not counted (the pause for those is
-# a separate concern, #11).
+# the user's explicit mode changes are not counted (they only get the
+# OFF_SETTLE pause, #11).
 MIN_CHANGEOVER_INTERVAL = 600  # 10 min
 
 # After the wrapper turns the unit OFF, HEAT/COOL isn't sent again until this
@@ -81,6 +81,13 @@ MIN_CHANGEOVER_INTERVAL = 600  # 10 min
 # AUTO never sends it, so every OFF is a user's or automation's request.
 # Midea inverters have their own ~3 min restart delay; this is the backstop.
 MIN_OFF_TIME = 300  # 5 min
+
+# HEAT↔COOL goes through OFF for this long, so the compressor spins down and
+# refrigerant pressures equalise before the reversing valve changes (#11).
+# Applies to AUTO flips and the user's own changes alike, whenever the device
+# is running the opposite mode.  An extra start ~1–2 times a day costs
+# nothing measurable.
+OFF_SETTLE = 60  # 1 min
 
 # Inside readings outside this range (°C, after unit conversion) are treated
 # as no reading at all: a failed sensor reporting -40 or 85 must not drive

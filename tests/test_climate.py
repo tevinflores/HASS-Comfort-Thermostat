@@ -47,6 +47,7 @@ from custom_components.comfort_thermostat.const import (
     MIN_OFF_TIME,
     MIN_TEMP,
     MIN_TEMP_DIFF,
+    OFF_SETTLE,
     OUT_OF_BAND_ALERT_MINUTES,
     SENSOR_STALE_MINUTES,
     SHORT_CYCLE_THRESHOLD_PER_H,
@@ -1018,6 +1019,14 @@ class TestAutoWithManualRange:
         await hass.async_create_task.call_args.args[0]
 
         assert entity._auto_mode == HVACMode.COOL
+        # The changeover stops the unit first (#11), then sends COOL.
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "off"
+        get = hass.states.get
+        off = MagicMock(state="off", attributes={})
+        hass.states.get = lambda eid: off if eid == REAL_CLIMATE_ID else get(eid)
+        advance(OFF_SETTLE)
+        await entity._async_sync_real_climate()
+
         call = hass.services.async_call.call_args
         assert call.args[1] == "set_temperature"
         assert call.args[2]["hvac_mode"] == HVACMode.COOL.value
@@ -2841,14 +2850,18 @@ class TestFastFlipConfirmation:
     @pytest.mark.asyncio
     async def test_manual_mode_change_not_blocked(self):
         """The interval spaces AUTO's own changeovers; an explicit user
-        HEAT -> COOL still goes straight through (the pause is #11)."""
+        HEAT -> COOL only gets the short OFF pause (#11)."""
         entity, hass, advance = self._entity()
         entity._hvac_mode = HVACMode.HEAT
         entity._last_changeover_at = entity._now()
 
-        await entity.async_set_hvac_mode(HVACMode.COOL)
+        with patch(
+            "custom_components.comfort_thermostat.climate.async_call_later"
+        ) as call_later:
+            await entity.async_set_hvac_mode(HVACMode.COOL)
 
-        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == HVACMode.COOL.value
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "off"
+        assert call_later.call_args.args[1] == OFF_SETTLE
 
 
 class TestImplausibleReadings:
@@ -3476,10 +3489,8 @@ class TestResendOnDrift:
 # Unit tests – minimum off-time before restarting the compressor (issue #31)
 # ---------------------------------------------------------------------------
 
-class TestMinOffTime:
-    """After the wrapper turns the unit OFF, HEAT/COOL is held until
-    MIN_OFF_TIME has passed, then sent by a self-scheduled re-check.  OFF
-    itself always goes straight through."""
+class _OffHoldHarness:
+    """Entity with a fake clock and a real-device state the test controls."""
 
     CALL_LATER = "custom_components.comfort_thermostat.climate.async_call_later"
 
@@ -3524,6 +3535,12 @@ class TestMinOffTime:
         call_later.call_args.args[2](None)
         if hass.async_create_task.called:
             await hass.async_create_task.call_args.args[0]
+
+
+class TestMinOffTime(_OffHoldHarness):
+    """After the wrapper turns the unit OFF, HEAT/COOL is held until
+    MIN_OFF_TIME has passed, then sent by a self-scheduled re-check.  OFF
+    itself always goes straight through."""
 
     @pytest.mark.asyncio
     async def test_off_is_sent_immediately(self):
@@ -3644,3 +3661,115 @@ class TestMinOffTime:
         await entity.async_will_remove_from_hass()
 
         cancel.assert_called_once()
+
+
+class TestChangeoverPause(_OffHoldHarness):
+    """HEAT↔COOL goes through OFF for OFF_SETTLE, so the compressor spins
+    down and pressures equalise before the reversing valve changes (#11)."""
+
+    def _sent_mode(self, hass):
+        return hass.services.async_call.call_args.args[2]["hvac_mode"]
+
+    @pytest.mark.asyncio
+    async def test_heat_to_cool_sends_off_first(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+
+        assert hass.services.async_call.call_count == 1
+        assert self._sent_mode(hass) == "off"
+        assert call_later.call_args.args[1] == OFF_SETTLE
+        assert entity._unit_command == HVACMode.OFF
+
+    @pytest.mark.asyncio
+    async def test_new_mode_is_sent_after_settle(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+        device["state"] = "off"
+        hass.services.async_call.reset_mock()
+
+        await self._fire(entity, hass, call_later)
+
+        assert self._sent_mode(hass) == "cool"
+        assert entity._unit_command == HVACMode.COOL
+
+    @pytest.mark.asyncio
+    async def test_cool_to_heat_pauses_too(self):
+        entity, hass, device = await self._entity(mode=HVACMode.COOL)
+
+        call_later = await self._set_mode(entity, HVACMode.HEAT)
+
+        assert self._sent_mode(hass) == "off"
+        assert call_later.call_args.args[1] == OFF_SETTLE
+
+    @pytest.mark.asyncio
+    async def test_auto_flip_pauses(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+        entity._hvac_mode = HVACMode.AUTO
+        entity._auto_mode = HVACMode.HEAT
+        await entity._async_sync_real_climate()
+        hass.services.async_call.reset_mock()
+
+        entity._auto_mode = HVACMode.COOL
+        with patch(self.CALL_LATER, return_value=MagicMock()) as call_later:
+            await entity._async_sync_real_climate()
+
+        assert self._sent_mode(hass) == "off"
+        assert call_later.call_args.args[1] == OFF_SETTLE
+
+    @pytest.mark.asyncio
+    async def test_no_pause_when_device_is_already_off(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+        device["state"] = "off"
+
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+
+        assert self._sent_mode(hass) == "cool"
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_pause_after_restart(self):
+        """The last command isn't needed: the device's own mode decides."""
+        entity, hass, device = await self._entity(mode=HVACMode.COOL)
+        entity._unit_command = None
+
+        await self._set_mode(entity, HVACMode.HEAT)
+
+        assert self._sent_mode(hass) == "off"
+
+    @pytest.mark.asyncio
+    async def test_setpoint_change_does_not_pause(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+
+        with patch(self.CALL_LATER) as call_later:
+            await entity.async_set_temperature(temperature=24.0)
+
+        sent = [c.args[2].get("hvac_mode") for c in hass.services.async_call.call_args_list]
+        assert "off" not in sent
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_pause_is_not_a_problem(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+        await self._set_mode(entity, HVACMode.COOL)
+        device["state"] = "off"
+        self.advance(COMMAND_GRACE_SECONDS + 1)
+
+        problems = entity._detect_problems()
+
+        assert not [p for p in problems if p.startswith(("min_off_time_wait", "command_desync"))]
+
+    @pytest.mark.asyncio
+    async def test_off_during_pause_gets_full_min_off_time(self):
+        entity, hass, device = await self._entity(mode=HVACMode.HEAT)
+        await self._set_mode(entity, HVACMode.COOL)
+        device["state"] = "off"
+        self.advance(30)
+        await entity.async_set_hvac_mode(HVACMode.OFF)
+        self.advance(OFF_SETTLE)
+        hass.services.async_call.reset_mock()
+
+        call_later = await self._set_mode(entity, HVACMode.COOL)
+
+        hass.services.async_call.assert_not_called()
+        assert call_later.call_args.args[1] == MIN_OFF_TIME - 30 - OFF_SETTLE
