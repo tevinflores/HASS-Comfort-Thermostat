@@ -271,7 +271,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # for OFF.  Together they are what the real device should show.
         self._unit_setpoint: float | None = None
 
-        # Drift re-send (#8): a pending re-check while the real device
+        # Drift re-send (#7): a pending re-check while the real device
         # doesn't match `_unit_command` / `_unit_setpoint`, how many
         # re-sends in a row it has taken, and whether the device was
         # available at the last event (to catch it coming back).
@@ -715,7 +715,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         Real-device state-change events never feed back into that state:
         they surface the current action (heating / cooling / idle / off) in
         the frontend, and re-send our command when the device stops
-        matching it (#8).
+        matching it (#7).
         """
         state = self.hass.states.get(self._real_climate_id)
         available = self._is_available(state)
@@ -842,7 +842,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
         The device works in the system unit, so round there: whole °F on a
         °F install (1 °F steps), not whole °C (1.8 °F steps, then rounded
-        again by the device) (#7).
+        again by the device) (#9).
 
         Round directionally (up for HEAT, down for COOL).  With band-edge
         setpoints that usually lands on the band edge itself; when it lands
@@ -1199,7 +1199,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             self.hass.async_create_task(self._async_sync_real_climate())
 
     # ------------------------------------------------------------------
-    # Drift correction (#8)
+    # Drift correction (#7)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1579,7 +1579,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                 self._target_temperature = temp
                 setpoint = self._device_setpoint(temp, self._hvac_mode)
                 if self._hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
-                    # So drift correction (#8) expects the new value.
+                    # So drift correction (#7) expects the new value.
                     self._unit_setpoint = setpoint
                 await self.hass.services.async_call(
                     "climate",

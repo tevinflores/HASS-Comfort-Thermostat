@@ -110,5 +110,5 @@ COMMAND_GRACE_SECONDS       = 60
 # COMMAND_GRACE_SECONDS (power blip, IR remote, dropped command), the
 # command is re-sent — at most this many times in a row, so a device that
 # refuses a mode isn't spammed.  The count resets once the device matches
-# or the wrapper's command changes; command_desync stays in `problems` (#8).
+# or the wrapper's command changes; command_desync stays in `problems` (#7).
 MAX_DRIFT_RESENDS           = 3

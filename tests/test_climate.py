@@ -2201,7 +2201,7 @@ class TestFahrenheitSystem:
     @pytest.mark.asyncio
     async def test_setpoint_sent_to_real_device_in_fahrenheit(self):
         """AUTO+HEAT on the Home preset sends low (21 °C = 69.8 °F) rounded
-        up to a whole °F, 70 (#7)."""
+        up to a whole °F, 70 (#9)."""
         hass = self._hass(real_climate_temp=None, inside_temp=68.0)
         entity = _make_entity(hass)
         entity._sync_from_sensors()  # 68 °F == 20 °C → HEAT
@@ -2936,7 +2936,7 @@ class TestMinRangeWidth:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests – setpoints rounded in the device's unit (issue #7)
+# Unit tests – setpoints rounded in the device's unit (issue #9)
 # ---------------------------------------------------------------------------
 
 def _f(celsius: float) -> float:
@@ -3044,7 +3044,7 @@ class TestFahrenheitDeviceRounding:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests – re-send commands when the device drifts (issue #8)
+# Unit tests – re-send commands when the device drifts (issue #7)
 # ---------------------------------------------------------------------------
 
 class TestResendOnDrift:

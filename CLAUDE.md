@@ -109,7 +109,7 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   attributes — go through `_to_celsius` / `_from_celsius`.  Returning the
   system unit here once made °F installs plot raw °C setpoints as °F.
 - Setpoints sent to the real device are **whole degrees in the system
-  unit** (`_device_setpoint`, #7): whole °F on a °F install, not whole °C
+  unit** (`_device_setpoint`, #9): whole °F on a °F install, not whole °C
   converted to 71.6 °F.  Rounding is directional (HEAT up, COOL down) with
   an in-band fallback, and the converted value is rounded to tenths first
   so 2-decimal °C storage noise (71 °F → 21.67 °C → 71.006 °F) can't ceil
@@ -337,7 +337,7 @@ rm -rf .pytest_cache __pycache__ .coverage
 - Master/slave (since #43): comfort thermostat is the sole writer of the real device's
   hvac_mode and setpoint; real-device state events are only mirrored as
   `hvac_action` for UI and never feed back into preset/setpoint state.
-  Since #8 they also trigger re-sending our command when the device
+  Since #7 they also trigger re-sending our command when the device
   drifts — the device is corrected, never the wrapper
 - All preset temperature ranges must respect MIN_TEMP_DIFF constraint
 - HA reads UI text from `translations/en.json`, not `strings.json`, for a
@@ -605,7 +605,7 @@ or the real device deciding for itself.  Only the *change* of
 `_unit_command` resets the grace window; re-issuing the same command
 does not.
 
-**Drift correction (#8).**  `_on_real_climate_update` compares the
+**Drift correction (#7).**  `_on_real_climate_update` compares the
 device against `_unit_command` and `_unit_setpoint` (the whole-degree
 setpoint in the device's unit; `None` for OFF):
 
