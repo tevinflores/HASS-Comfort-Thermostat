@@ -95,7 +95,7 @@ INSIDE_TEMP_PLAUSIBLE_MAX = 45.0
 # generously so transient blips don't fire false alarms; tune down if
 # false-negatives matter more than false-alarms in a given deployment.
 OUT_OF_BAND_ALERT_MINUTES   = 30   # sustained outside [low, high] in AUTO
-SHORT_CYCLE_THRESHOLD_PER_H = 6    # COOL starts/hour above this is "too much"
+SHORT_CYCLE_THRESHOLD_PER_H = 6    # compressor starts/hour above this is "too much"
 SENSOR_STALE_MINUTES        = 15   # no inside-temp update for this long
 
 # Command-desync detection: how long we wait for the real device to

@@ -592,12 +592,16 @@ Conditions checked:
 | `real_climate_unavailable` / `_missing` | Wrapped climate device is unreachable | immediate |
 | `auto_waiting_for_reading` | AUTO has no inside reading and no committed direction, so the device is left untouched (#5) | immediate |
 | `out_of_band:Nmin` | AUTO can't keep room in band | `OUT_OF_BAND_ALERT_MINUTES` (30) |
-| `short_cycle:N/h` | COOL starts/hour too high | `SHORT_CYCLE_THRESHOLD_PER_H` (6) |
+| `short_cycle:N/h` | Real compressor starts (heat or cool) per hour too high (#8) | `SHORT_CYCLE_THRESHOLD_PER_H` (6) |
 | `command_desync:want=X_got=Y` | Wrapper commanded `X` but real device is in `Y` past `COMMAND_GRACE_SECONDS` (60) | 60 s |
 
 `out_of_band` only fires in AUTO (manual modes are on the user's
-terms).  `short_cycle` count is a rolling 1-hour window of `OFF→COOL`
-transitions tracked in `_async_sync_real_climate`.
+terms).  `short_cycle` count is a rolling 1-hour window of the real
+device's `hvac_action` going into `heating` or `cooling` from a
+stopped action, tracked in `_on_real_climate_update`.  Defrost and dry
+count as running, so a defrost cycle isn't a start.  The wrapper's own
+command can't be used: since v5.0.0 it hardly changes while the unit
+cycles on its own.
 
 **`command_desync`** catches silent failure to land a command — e.g.
 a `set_hvac_mode` call dropped during a real-device unavailability,
@@ -646,7 +650,7 @@ a room that was actually at 22.7 °C.  Persisted state means we keep
 the previously-correct commitment instead of guessing again.
 
 `_pending_flip_since`, `_fast_flip_since`, `_last_changeover_at`,
-`_out_of_band_since`, and `_cool_start_times` are *not* persisted —
+`_out_of_band_since`, and `_compressor_starts` are *not* persisted —
 they re-arm naturally from sensor data and the worst-case latency on
 each is acceptable (`FLIP_DWELL` 30 min, `FAST_FLIP_CONFIRM` 3 min,
 `OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).  Losing
