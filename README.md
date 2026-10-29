@@ -98,6 +98,14 @@ templates / dashboards:
 - The preset is cleared whenever the user directly adjusts setpoints.
 - All temperature changes are forwarded directly to the real device.
 
+### Compressor protection
+
+After the thermostat turns the unit OFF, it waits at least 5 minutes before
+starting heating or cooling again, so an automation or preset that toggles
+the mode quickly can't restart the compressor straight away.  A held start
+shows up in `problems` as `min_off_time_wait:<seconds>s` and is sent
+automatically when the wait ends.  Turning OFF is never delayed.
+
 ### External changes
 
 The thermostat is the only thing that should control the real device's mode

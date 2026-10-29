@@ -75,6 +75,13 @@ FAST_FLIP_CONFIRM = 180  # 3 min
 # a separate concern, #11).
 MIN_CHANGEOVER_INTERVAL = 600  # 10 min
 
+# After the wrapper turns the unit OFF, HEAT/COOL isn't sent again until this
+# has passed, so an automation or preset that toggles the mode quickly can't
+# restart the compressor straight away (#31).  OFF itself is never delayed:
+# AUTO never sends it, so every OFF is a user's or automation's request.
+# Midea inverters have their own ~3 min restart delay; this is the backstop.
+MIN_OFF_TIME = 300  # 5 min
+
 # Inside readings outside this range (°C, after unit conversion) are treated
 # as no reading at all: a failed sensor reporting -40 or 85 must not drive
 # AUTO.  Reported in `problems` as inside_sensor_implausible:<value>.
