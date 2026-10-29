@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.2.0...v1.2.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **climate:** hold HEAT/COOL for a minimum off-time after OFF ([d1c8dff](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/d1c8dffa0eb53d43720154a81ef9d41b60c5ce4c))
+
 ## [1.2.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.4...v1.2.0) (2026-10-29)
 
 
