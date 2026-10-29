@@ -50,15 +50,15 @@ TEMP_STEP = 0.5
 # directions for every band on the TEMP_STEP grid (#6).
 MIN_TEMP_DIFF = 1.5
 
-# AUTO mode picks HEAT or COOL once and holds it; the real device's setpoint
-# is the comfort-band midpoint and the (modulating) device is left to settle
-# on it.  HEAT↔COOL flips only when the inside temperature has been
-# continuously past the midpoint by FLIP_MARGIN for FLIP_DWELL seconds —
-# i.e. the room is asking for the opposite mode, not just jittering across
-# the boundary.  This is sized for inverter heat pumps where the cost of
-# restarting the compressor far exceeds the energy of holding low
-# modulation, and where short OFF cycles defeat the unit's own steady-state
-# operation.
+# AUTO mode picks HEAT or COOL once and holds it, sending the real device an
+# asymmetric setpoint (HEAT → low, COOL → high - 1) and leaving the
+# (modulating) device to hold it.  Within the band, HEAT↔COOL flips only
+# when the inside temperature has been continuously past the midpoint by
+# FLIP_MARGIN for FLIP_DWELL seconds — i.e. the room is asking for the
+# opposite mode, not just jittering across the boundary.  This is sized for
+# inverter heat pumps where the cost of restarting the compressor far
+# exceeds the energy of holding low modulation, and where short OFF cycles
+# defeat the unit's own steady-state operation.
 FLIP_MARGIN = 0.5
 FLIP_DWELL = 1800  # 30 min
 

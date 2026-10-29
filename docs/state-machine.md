@@ -1,13 +1,12 @@
 # Comfort Thermostat — AUTO mode state machine
 
-Reference for the AUTO-mode behavior of `climate.comfort_thermostat` as of
-**v3.1.0**.  Two layers compose:
+Reference for the current AUTO-mode behavior of `climate.comfort_thermostat`.
+Two layers compose:
 
 1. **Direction commitment** (`_auto_mode`) — sticky HEAT or COOL choice
    that flips on demand mismatch.
-2. **Unit command** — the actual mode sent to the wrapped device on each
-   sensor tick, derived from the committed direction and current
-   temperature.
+2. **Unit command** — the mode and setpoint sent to the wrapped device:
+   the committed direction, with a setpoint at the matching band edge.
 
 Other HVAC modes (`OFF`, `HEAT`, `COOL`) pass through to the wrapped
 device unchanged; the state machines below only apply when the wrapper
@@ -29,8 +28,8 @@ stateDiagram-v2
     Uninitialized --> HEAT: inside < mid
     Uninitialized --> COOL: inside ≥ mid
 
-    HEAT --> COOL: fast-flip\n(inside > high)
-    COOL --> HEAT: fast-flip\n(inside < low)
+    HEAT --> COOL: fast-flip\n(inside > high\nfor FAST_FLIP_CONFIRM = 3 min)
+    COOL --> HEAT: fast-flip\n(inside < low\nfor FAST_FLIP_CONFIRM = 3 min)
 
     HEAT --> COOL: dwell-flip\n(inside ≥ mid + FLIP_MARGIN\nfor FLIP_DWELL = 30 min)
     COOL --> HEAT: dwell-flip\n(inside ≤ mid − FLIP_MARGIN\nfor FLIP_DWELL = 30 min)
@@ -38,6 +37,10 @@ stateDiagram-v2
     HEAT --> [*]: leave AUTO
     COOL --> [*]: leave AUTO
 ```
+
+Both flips also wait until `MIN_CHANGEOVER_INTERVAL` (10 min) has passed
+since the previous AUTO changeover, so the reversing valve can't
+ping-pong.  The initial pick doesn't count as a changeover.
 
 ### Why two flip mechanisms
 
@@ -48,12 +51,13 @@ the midpoint**.  When inside oscillates around `mid ± FLIP_MARGIN`,
 But the dwell is the wrong filter when inside is **already past the
 band edge** — there's no jitter explanation for `inside > high` while
 HEAT is committed.  That's a wrong commitment, not noise.  Fast-flip
-catches it on the very next sensor tick.
+catches it after a short confirmation, so a single bad reading (e.g. a
+Z-Wave sensor re-initialising) can't reverse the heat pump.
 
 | Mechanism | Trigger | Latency |
 |---|---|---|
-| **Fast-flip** | Wrong direction + inside past band edge (`HEAT & inside > high`, or `COOL & inside < low`) | Immediate (next sensor tick) |
-| **Dwell-flip** | Wrong direction + inside past `mid ± FLIP_MARGIN` but still in band | 30 min sustained excursion |
+| **Fast-flip** | Wrong direction + inside past band edge (`HEAT & inside > high`, or `COOL & inside < low`) | `FAST_FLIP_CONFIRM` (3 min) |
+| **Dwell-flip** | Wrong direction + inside past `mid ± FLIP_MARGIN` but still in band | `FLIP_DWELL` (30 min) |
 
 ### Initial-pick rule (`_auto_mode == None`)
 
@@ -63,91 +67,47 @@ thermodynamics in this deployment, and using it caused live HEAT-at-23
 bugs (see [PR #62](https://github.com/HomeOps/HASS-Smart-Climate/pull/62)).
 Outside sensor remains a valid config option for display / future use.
 
+### No reading
+
+If there is no usable inside reading (sensor unavailable, unparsable or
+implausible), AUTO makes no decision: a committed direction is held and
+the device command stays put.  With no committed direction either, the
+device is left untouched and `problems` reports `auto_waiting_for_reading`.
+
 ---
 
-## Layer 2 — Unit command (per-tick decision)
+## Layer 2 — Unit command
 
-Given a committed direction and the current inside temperature, what
-mode does the wrapper send to the wrapped device?
+The wrapper sends the committed direction and never commands OFF in
+AUTO.  The setpoint is **asymmetric**, because the Midea unit holds the
+room at or slightly above its setpoint (up to about +0.5 °C) in both
+modes:
 
-### `_auto_mode == HEAT`
-
-Always **`HEAT`**.  v2.0.0 contract preserved: on this Midea inverter
-the unit modulates HEAT down to a true compressor idle when no demand,
-so commanding OFF (and absorbing the start-up cost on the next call
-for heat) costs more than just letting it sit.
-
-### `_auto_mode == COOL`
-
-Asymmetric — the in-band hysteresis is what stops the COOL minimum-
-frequency floor from pumping unwanted cold air:
-
-```mermaid
-flowchart TD
-    Start([inside, _auto_mode = COOL]) --> AboveBand{inside &gt; high<br/>or inside &lt; low?}
-    AboveBand -->|Yes,<br/>real demand| RunCool[Send <b>COOL</b>]
-    AboveBand -->|No, in band| WasCool{Last command<br/>was COOL?}
-    WasCool -->|Yes| AboveMid{inside &gt; mid?}
-    AboveMid -->|Yes,<br/>keep cooling| RunCool
-    AboveMid -->|No,<br/>full pull achieved| RunOff[Send <b>OFF</b><br/><i>(deliberate-OFF)</i>]
-    WasCool -->|No / None| AboveRestart{inside &gt; mid<br/>+ COOL_RESTART_OFFSET?}
-    AboveRestart -->|Yes,<br/>start next pull| RunCool
-    AboveRestart -->|No,<br/>stay quiet| RunOff
-```
-
-### Why hysteresis
-
-Without asymmetric thresholds, the wrapper short-cycles at the band
-edge: temp hits `high`, COOL runs briefly, temp drops 0.1 °C, OFF
-fires.  The cycle does no useful cooling and wastes compressor starts.
-
-The fix uses two thresholds keyed on the wrapper's last command:
-
-| State | Restart at | Stop at | Per-cycle pull |
+| Committed | Setpoint sent | Room held at | `[21, 23]` example |
 |---|---|---|---|
-| Last was COOL | (already cooling) | `inside ≤ mid` | `mid + RESTART_OFFSET → mid` |
-| Last was OFF / None | `inside > mid + RESTART_OFFSET` | (already off) | (waits for restart trigger) |
+| HEAT | `low` | `low` … `low + 0.5` | setpoint 21, room ~21–21.5 |
+| COOL | `high - 1` | `high - 1` … `high - 0.5` | setpoint 22, room ~22–22.5 |
 
-For the default home preset (`[21, 23]`, `mid = 22`,
-`COOL_RESTART_OFFSET = 0.75`):
+COOL can't use `high`: the positive overshoot would hold the room above
+the band.  Between the two ranges (21.5–22 above) neither mode actively
+pumps; the unit idles on its own setpoint logic.
 
-```
-   COOL      ░░░░░░░░░░░░░░░░░░░░░░░░░ ← mid + RESTART_OFFSET = 22.75
-                                          (restart threshold)
-                                          ┌── 0.25 °C lag headroom
-                                          │
-   ════════════════════════════════════ ← high = 23
-                                          │
-                                          └── room must NOT exceed
-                                              this in steady state
-   COOL      ░░░░░░░░░░░░░░░░░░░░░░░░░ ← mid = 22 (stop threshold)
-   pulse:    ┃         ┃    ↑
-             stop      restart
-             (mid)     (mid + 0.75)
-```
+Setpoints are sent in **whole degrees of the Home Assistant system
+unit** (°C or °F), rounded toward the inside of the band: up for HEAT,
+down for COOL.  `MIN_TEMP_DIFF` (1.5 °C) is the narrowest band where that
+rounding plus the overshoot still lands in band.
 
-The 0.25 °C between the restart threshold (22.75) and the high edge
-(23) is the unit's **response-lag headroom** — compressor ramp + air
-circulation time.  By the time current would otherwise hit 23, COOL
-flow is already pulling the room down.
+### Why the setpoint, not wrapper cycling, controls idle
 
-> **Requires a sub-degree (decimal) inside-temp sensor.**  A whole-
-> degree sensor jumps `22 → 23` and skips the 22.75 threshold,
-> defeating the lead.  This deployment uses Aeotec Multisensor 7
-> (0.1 °C resolution).  For coarser sensors, raise
-> `COOL_RESTART_OFFSET` to at least `(sensor_resolution + 0.5 °C)`.
+Upstream v3.0.x – v4.0.x had the wrapper turn the unit OFF inside the
+band during COOL (deliberate-OFF) to avoid the Midea **COOL
+minimum-frequency floor**.  Measured on 2026-05-02, that cycling drew
+~50× the power of simply letting the unit hold `high - 1`, and it was
+removed in v5.0.0.  With the band-edge setpoint the unit never enters
+the low-load regime that triggers the floor.
 
-### Why HEAT doesn't need the same hysteresis
-
-The Midea unit modulates HEAT down to a true compressor idle when no
-demand — likely because in HEAT the indoor coil is the hot side, so
-refrigerant migrates outdoors when stopped (benign, no slug-on-restart
-risk).  COOL inverts that geometry, so the firmware holds a minimum
-frequency to prevent slugging.  The wrapper provides the idle the unit
-won't, but only where it's needed.
-
-See [`CLAUDE.md`](../CLAUDE.md#why-the-asymmetry-exists-refined-theory)
-for the refined theory and the design history.
+See [`CLAUDE.md`](../CLAUDE.md#midea-unit-behaviour--empirical-notes)
+for the unit observations and the design history.
 
 ---
 
@@ -157,21 +117,31 @@ Per sensor tick:
 
 1. If `_auto_mode is None`: pick HEAT or COOL by inside-vs-mid.
 2. **Fast-flip check**: if committed direction is wrong AND inside is
-   past the band edge, flip `_auto_mode` immediately.
+   past the band edge for `FAST_FLIP_CONFIRM`, flip `_auto_mode` (subject
+   to `MIN_CHANGEOVER_INTERVAL`).
 3. **Dwell-flip check**: update `_pending_flip_since` based on `mid ±
-   FLIP_MARGIN` deviation; flip `_auto_mode` if sustained for 30 min.
-4. **Unit command**: derive HEAT / COOL / OFF from the (possibly just-
-   flipped) `_auto_mode` per Layer 2.
-5. **Send to device**: only call `set_temperature` / `set_hvac_mode`
-   when the unit's reported state differs from the desired one.
+   FLIP_MARGIN` deviation; flip `_auto_mode` if sustained for 30 min
+   (subject to `MIN_CHANGEOVER_INTERVAL`).
+4. **Unit command**: the committed direction with its band-edge setpoint.
+5. **Send to device**: only call `set_temperature` when the unit's
+   reported mode or setpoint differs from the desired one.
 
-The wrapper exposes its decision via `hvac_action`:
+`hvac_action` mirrors the unit's own action (`heating`, `cooling`,
+`idle`, `off`, …).
 
-| Wrapper state | `hvac_action` |
+### When the device drifts
+
+The wrapper is the only writer of the device's mode and setpoint.  If the
+device stops matching the last command, the wrapper re-sends it:
+
+| Situation | Re-sent |
 |---|---|
-| Active mode → unit reports `cooling` / `heating` | mirrors the unit |
-| AUTO + COOL committed + in-band → unit OFF | **`idle`** (deliberate-OFF) |
-| User-commanded OFF | `off` |
+| Device back from unavailable (power blip) | Immediately |
+| Setpoint differs, or the command never landed | After `COMMAND_GRACE_SECONDS` (60 s) |
+| Device was in the commanded mode, then something else changed it (IR remote) | After that mode has run `MIN_CHANGEOVER_INTERVAL` (10 min), so the compressor isn't short-cycled |
+
+At most `MAX_DRIFT_RESENDS` (3) re-sends in a row; after that
+`command_desync` stays in `problems`.
 
 ---
 
@@ -195,7 +165,12 @@ All thresholds live in [`const.py`](../custom_components/comfort_thermostat/cons
 |---|---|---|
 | `FLIP_MARGIN` | 0.5 °C | Past midpoint to count as wrong-side |
 | `FLIP_DWELL` | 1800 s (30 min) | Sustained-excursion threshold for dwell-flip |
-| `COOL_RESTART_OFFSET` | 0.75 °C | Above mid where COOL restarts (lead the high edge) |
+| `FAST_FLIP_CONFIRM` | 180 s (3 min) | How long a band-edge violation must hold before fast-flip |
+| `MIN_CHANGEOVER_INTERVAL` | 600 s (10 min) | Minimum spacing between AUTO changeovers; also how long a remote-set mode runs before it's undone |
+| `MIN_TEMP_DIFF` | 1.5 °C | Narrowest allowed comfort band |
+| `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` | 0 / 45 °C | Inside readings outside this range count as no reading |
+| `COMMAND_GRACE_SECONDS` | 60 | Time for the device to follow a command before desync / re-send |
+| `MAX_DRIFT_RESENDS` | 3 | Re-sends in a row before giving up |
 | `OUT_OF_BAND_ALERT_MINUTES` | 30 | When AUTO can't keep room in band |
 | `SHORT_CYCLE_THRESHOLD_PER_H` | 6 | Compressor starts/h above this is a problem |
 | `SENSOR_STALE_MINUTES` | 15 | Inside-sensor freshness threshold |

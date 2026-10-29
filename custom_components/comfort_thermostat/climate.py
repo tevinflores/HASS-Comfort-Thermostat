@@ -132,13 +132,14 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
     In AUTO mode the entity manages a *temperature range* (low/high setpoints)
     and picks HEAT or COOL once, holding that mode while the (modulating)
-    real device settles on the comfort-band midpoint.  HEAT↔COOL flips only
-    after the inside temperature has been continuously past the midpoint by
-    FLIP_MARGIN for FLIP_DWELL seconds — i.e. the room is genuinely asking
-    for the opposite mode, not just jittering across the boundary.  The real
-    device is never commanded OFF in AUTO; on inverter heat pumps a steady
-    setpoint at low modulation costs less than the start-up of an OFF→ON
-    cycle, and short OFF cycles defeat the unit's own steady-state operation.
+    real device holds an asymmetric setpoint: ``low`` for HEAT, ``high - 1``
+    for COOL.  HEAT↔COOL flips when the room is genuinely asking for the
+    opposite mode, not just jittering across the boundary: past the band
+    edge for FAST_FLIP_CONFIRM, or past the midpoint by FLIP_MARGIN for
+    FLIP_DWELL.  The real device is never commanded OFF in AUTO; on inverter
+    heat pumps a steady setpoint at low modulation costs less than the
+    start-up of an OFF→ON cycle, and short OFF cycles defeat the unit's own
+    steady-state operation.
 
     Four presets are supported:
       - Home  – default daytime comfort range
@@ -263,9 +264,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         self._flip_recheck_unsub: CALLBACK_TYPE | None = None
 
         # Last unit command (HEAT/COOL/OFF) the wrapper computed for the
-        # real device.  Used by the hvac_action property to surface IDLE
-        # while in AUTO + deliberate-OFF (inside the comfort band) so the
-        # frontend distinguishes "AUTO resting" from "user turned it off".
+        # real device: what command_desync and drift correction (#7) expect
+        # the device to show.
         self._unit_command: HVACMode | None = None
 
         # Timestamp of the last `_unit_command` change.  Used by the
@@ -335,12 +335,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     @property
     def hvac_action(self) -> HVACAction | None:
         """Return the current running HVAC action mirrored from the real
-        device.  v3.0.x had a special case here that surfaced IDLE when
-        the wrapper had commanded OFF in AUTO+COOL (deliberate-OFF).
-        Removed in v5.0.0 along with the deliberate-OFF design — the
-        wrapper now just commands HEAT or COOL in AUTO and lets the unit
-        idle internally via its own setpoint logic; the unit's own
-        `hvac_action=idle` is the right signal.
+        device.  AUTO only ever commands HEAT or COOL and the unit idles
+        on its own setpoint logic, so the unit's own ``idle`` is the right
+        signal.
         """
         return self._hvac_action
 
@@ -435,9 +432,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
           `async_added_to_hass` to skip the initial pick on potentially
           glitchy post-restart sensor data.
         - ``last_unit_command`` is the wrapper's last command to the
-          real device (`heat`/`cool`/`off`).  Persisted for the same
-          reason — keeps COOL hysteresis state continuous across
-          restarts.
+          real device (`heat`/`cool`/`off`).  Persisted so command_desync
+          and drift correction (#7) know what was last sent after a
+          restart.
         """
         return {
             "problems": self._detect_problems(),
@@ -1066,20 +1063,15 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         Direction is changed by:
 
         - **Initial pick**: inside-vs-mid on first AUTO entry.
-        - **Fast-flip**: inside past the wrong band edge → flip
-          immediately (no dwell).
+        - **Fast-flip**: inside past the wrong band edge for
+          `FAST_FLIP_CONFIRM` seconds → flip.
         - **Dwell-flip**: inside past `mid ± FLIP_MARGIN` against the
           committed direction for `FLIP_DWELL` seconds → flip.
 
-        v3.0.x added a wrapper-level deliberate-OFF for the COOL-in-band
-        case to fix a Midea min-frequency-floor symptom.  v4.0.0's
-        asymmetric-setpoint design already prevents that symptom (with
-        setpoint=high-1, the unit only actively cools above its own
-        threshold, ~22.5 for [21, 23]).  Keeping deliberate-OFF on top
-        of the corrected setpoint just added cycling overhead — empirical
-        2026-05-02 comparison showed manual constant-cool used **~50×
-        less power** than comfort_thermostat's deliberate-OFF cycling on a
-        warm afternoon (1.17 kW avg vs 23 W avg).  Removed in v5.0.0.
+        Both are spaced by `MIN_CHANGEOVER_INTERVAL`.  The wrapper never
+        commands OFF in AUTO: upstream's wrapper-driven COOL cycling
+        (deliberate-OFF) drew ~50× the power of letting the unit hold its
+        own setpoint and was removed in v5.0.0; see CLAUDE.md.
         """
         if self._hvac_mode == HVACMode.OFF:
             return HVACMode.OFF
@@ -1352,9 +1344,6 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             self._drift_resends = 0
             self._device_matched = False
             self._foreign_mode = None
-        # Record the wrapper's intent so hvac_action can surface IDLE for
-        # deliberate-OFF (AUTO + OFF inside the comfort band) without
-        # re-running _desired_real_mode (which has timer side-effects).
         self._unit_command = real_mode
 
         real_state = self.hass.states.get(self._real_climate_id)
@@ -1376,11 +1365,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             # (control methods) still go through.
             return
 
-        # OFF reaches here in two cases now: (a) the user commanded smart
-        # climate OFF, and (b) AUTO is in deliberate-OFF — the wrapper
-        # provides the idle state Midea inverters can't (their HEAT/COOL
-        # modes hold a min-frequency floor instead of truly idling).
-        # Forward the OFF; only send the command if the real device isn't
+        # OFF reaches here only when the user turned the thermostat OFF
+        # (AUTO never commands it).  Only send it if the real device isn't
         # already off.
         if real_mode == HVACMode.OFF:
             self._unit_setpoint = None
