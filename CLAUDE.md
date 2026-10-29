@@ -610,9 +610,16 @@ device against `_unit_command` and `_unit_setpoint` (the whole-degree
 setpoint in the device's unit; `None` for OFF):
 
 - Device back from unavailable (power blip) → re-sync immediately.
-- Any other mismatch (IR remote, dropped command) → re-check after
-  `COMMAND_GRACE_SECONDS`; if it persists, re-send.  A pending re-check
-  isn't pushed out by later events.
+- Command never landed (device never showed it) or setpoint-only drift
+  → re-check after `COMMAND_GRACE_SECONDS`; if it persists, re-send.  A
+  pending re-check isn't pushed out by later events.
+- Device showed our command, then something else (IR remote) changed its
+  **mode** → that mode is left running for `MIN_CHANGEOVER_INTERVAL`
+  before it is undone, and a sensor-driven sync doesn't undo it sooner.
+  Undoing it after 60 s would short-cycle the unit, and a remote that
+  keeps fighting would ping-pong it.  The wait restarts if the device
+  changes mode again; the user's own changes in the thermostat aren't
+  held back.
 - At most `MAX_DRIFT_RESENDS` (3) re-sends in a row, then a log warning
   and `command_desync` in `problems`.  The count resets when the device
   matches or the command changes.
