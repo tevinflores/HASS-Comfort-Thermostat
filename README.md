@@ -51,6 +51,15 @@ After setup, click **Configure** on the integration card (or go to **Options**) 
 | **Sleep** | 19 °C – 22 °C |
 | **Away** | 18 °C – 26 °C |
 
+The same form sets two **safety limits** (default 7 °C and 32 °C).  If the
+inside temperature goes below the low one or above the high one, `problems`
+reports `below_safety_min` or `above_safety_max`, in every mode including
+OFF.  Use it to get notified if the house is freezing or overheating while
+you're away.  The thermostat only alerts; it doesn't turn the unit on.
+
+All temperatures in the form are shown and entered in your Home Assistant
+unit (°C or °F).
+
 ## How It Works
 
 ### AUTO mode
@@ -83,7 +92,7 @@ diagrams, decision flowchart, and design rationale.**
 The wrapper exposes a `problems` extra-state-attribute — a list of detected
 issues (empty list `[]` when healthy).  Conditions checked: inside-sensor
 unavailable / stale / implausible, real-device unavailable, sustained
-out-of-band in AUTO, compressor short-cycling (more than 6 starts an hour),
+out-of-band in AUTO, inside temperature past the safety limits (any mode), compressor short-cycling (more than 6 starts an hour),
 and the real device not following the thermostat's command.  Use in
 templates / dashboards:
 

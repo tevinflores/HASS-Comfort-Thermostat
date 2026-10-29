@@ -18,11 +18,15 @@ from custom_components.comfort_thermostat.const import (
     CONF_INSIDE_SENSOR_AWAY,
     CONF_INSIDE_SENSOR_SLEEP,
     CONF_OUTSIDE_SENSOR,
+    CONF_SAFETY_MAX,
+    CONF_SAFETY_MIN,
     CONF_REAL_CLIMATE,
     CONF_SLEEP_MAX,
     CONF_SLEEP_MIN,
     DEFAULT_HOME_MAX,
     DEFAULT_HOME_MIN,
+    DEFAULT_SAFETY_MAX,
+    DEFAULT_SAFETY_MIN,
     MIN_TEMP_DIFF,
 )
 
@@ -444,3 +448,84 @@ class TestOptionsFlowRangeWidth:
         }
         result = await self._submit(f_input, "°F")
         assert result["placeholders"]["min_diff"] == "2.7 °F"
+
+
+# ---------------------------------------------------------------------------
+# Options flow — safety limits (issue #12)
+# ---------------------------------------------------------------------------
+
+class TestOptionsFlowSafetyLimits:
+    """Safety limits are stored in °C, shown in the system unit, and the
+    low limit must be below the high one."""
+
+    _VALID = TestOptionsFlowRangeWidth._VALID
+    _submit = TestOptionsFlowRangeWidth._submit
+
+    def _entry(self, options: dict | None = None) -> MagicMock:
+        return _make_entry(
+            data={CONF_REAL_CLIMATE: REAL_CLIMATE_ID, CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID},
+            options=options,
+        )
+
+    def _selector(self, schema, key):
+        return next(v for k, v in schema.schema.items() if str(k) == key)
+
+    @pytest.mark.asyncio
+    async def test_defaults_in_celsius(self):
+        defaults = _schema_defaults(await _build_options_schema(self._entry()))
+        assert defaults[CONF_SAFETY_MIN] == DEFAULT_SAFETY_MIN
+        assert defaults[CONF_SAFETY_MAX] == DEFAULT_SAFETY_MAX
+
+    @pytest.mark.asyncio
+    async def test_shown_in_fahrenheit(self):
+        schema = await _build_options_schema(self._entry(), "°F")
+        defaults = _schema_defaults(schema)
+        assert defaults[CONF_SAFETY_MIN] == 44.6  # 7 °C
+        assert defaults[CONF_SAFETY_MAX] == 89.6  # 32 °C
+        selector = self._selector(schema, CONF_SAFETY_MIN)
+        assert selector.config["unit_of_measurement"] == "°F"
+        assert selector.config["min"] == 32.0  # 0 °C
+        assert selector.config["max"] == 113.0  # 45 °C
+
+    @pytest.mark.asyncio
+    async def test_stored_value_shown(self):
+        entry = self._entry(options={CONF_SAFETY_MIN: 10.0, CONF_SAFETY_MAX: 30.0})
+        defaults = _schema_defaults(await _build_options_schema(entry))
+        assert defaults[CONF_SAFETY_MIN] == 10.0
+        assert defaults[CONF_SAFETY_MAX] == 30.0
+
+    @pytest.mark.asyncio
+    async def test_fahrenheit_stored_as_celsius(self):
+        f_input = {
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_HOME_MIN: 70.0,
+            CONF_HOME_MAX: 75.0,
+            CONF_SLEEP_MIN: 66.0,
+            CONF_SLEEP_MAX: 72.0,
+            CONF_AWAY_MIN: 64.0,
+            CONF_AWAY_MAX: 79.0,
+            CONF_SAFETY_MIN: 41.0,
+            CONF_SAFETY_MAX: 95.0,
+        }
+        result = await self._submit(f_input, "°F")
+        assert result["data"][CONF_SAFETY_MIN] == 5.0
+        assert result["data"][CONF_SAFETY_MAX] == 35.0
+
+    @pytest.mark.asyncio
+    async def test_inverted_limits_rejected(self):
+        user_input = dict(self._VALID, **{CONF_SAFETY_MIN: 30.0, CONF_SAFETY_MAX: 10.0})
+        result = await self._submit(user_input)
+        assert result["errors"] == {CONF_SAFETY_MAX: "safety_limits_inverted"}
+
+    @pytest.mark.asyncio
+    async def test_equal_limits_rejected(self):
+        user_input = dict(self._VALID, **{CONF_SAFETY_MIN: 20.0, CONF_SAFETY_MAX: 20.0})
+        result = await self._submit(user_input)
+        assert result["errors"] == {CONF_SAFETY_MAX: "safety_limits_inverted"}
+
+    @pytest.mark.asyncio
+    async def test_valid_limits_saved(self):
+        user_input = dict(self._VALID, **{CONF_SAFETY_MIN: 5.0, CONF_SAFETY_MAX: 35.0})
+        result = await self._submit(user_input)
+        assert result["type"] == "create_entry"
+        assert result["data"][CONF_SAFETY_MIN] == 5.0

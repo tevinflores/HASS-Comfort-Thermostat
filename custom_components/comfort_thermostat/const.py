@@ -36,6 +36,14 @@ DEFAULT_SLEEP_MAX = 22.0
 DEFAULT_AWAY_MIN = 18.0
 DEFAULT_AWAY_MAX = 26.0
 
+# Safety limits (°C), checked against the inside reading in every mode so a
+# house left OFF can't freeze or overheat unnoticed (#12).  Reported in
+# `problems` as below_safety_min / above_safety_max.
+CONF_SAFETY_MIN = "safety_min"
+CONF_SAFETY_MAX = "safety_max"
+DEFAULT_SAFETY_MIN = 7.0
+DEFAULT_SAFETY_MAX = 32.0
+
 # Temperature constraints
 MIN_TEMP = 10.0
 MAX_TEMP = 35.0

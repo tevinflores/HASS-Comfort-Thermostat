@@ -29,6 +29,8 @@ from .const import (
     CONF_INSIDE_SENSOR_AWAY,
     CONF_INSIDE_SENSOR_SLEEP,
     CONF_OUTSIDE_SENSOR,
+    CONF_SAFETY_MAX,
+    CONF_SAFETY_MIN,
     CONF_REAL_CLIMATE,
     CONF_SLEEP_MAX,
     CONF_SLEEP_MIN,
@@ -36,9 +38,13 @@ from .const import (
     DEFAULT_AWAY_MIN,
     DEFAULT_HOME_MAX,
     DEFAULT_HOME_MIN,
+    DEFAULT_SAFETY_MAX,
+    DEFAULT_SAFETY_MIN,
     DEFAULT_SLEEP_MAX,
     DEFAULT_SLEEP_MIN,
     DOMAIN,
+    INSIDE_TEMP_PLAUSIBLE_MAX,
+    INSIDE_TEMP_PLAUSIBLE_MIN,
     MAX_TEMP,
     MIN_TEMP,
     MIN_TEMP_DIFF,
@@ -53,6 +59,8 @@ _PRESET_TEMP_KEYS = (
     CONF_AWAY_MIN,
     CONF_AWAY_MAX,
 )
+
+_SAFETY_KEYS = (CONF_SAFETY_MIN, CONF_SAFETY_MAX)
 
 _PRESET_RANGE_KEYS = (
     (CONF_HOME_MIN, CONF_HOME_MAX),
@@ -69,12 +77,15 @@ def _min_diff_display(unit: str) -> str:
     return f"{round(diff, 1)} {unit}"
 
 
-def _temp_selector(unit: str) -> NumberSelector:
-    """Return a preset-temperature selector bounded in the display ``unit``."""
+def _temp_selector(
+    unit: str, low: float = MIN_TEMP, high: float = MAX_TEMP
+) -> NumberSelector:
+    """Return a temperature selector bounded (°C ``low``..``high``) in the
+    display ``unit``."""
     return NumberSelector(
         NumberSelectorConfig(
-            min=_to_display(MIN_TEMP, unit),
-            max=_to_display(MAX_TEMP, unit),
+            min=_to_display(low, unit),
+            max=_to_display(high, unit),
             step=TEMP_STEP,
             unit_of_measurement=unit,
             mode=NumberSelectorMode.BOX,
@@ -155,7 +166,7 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
         self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
-        """Manage sensors and preset temperature options for an existing entry.
+        """Manage sensors, preset temperatures and safety limits.
 
         Includes the per-preset inside sensors so existing installs can wire
         up Sleep / Away zones without deleting and re-adding the integration.
@@ -163,7 +174,7 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
         setup values) and ``entry.options`` (previous edits via this flow)
         so the form always shows the currently effective configuration.
 
-        Preset temperatures are stored in °C (the entity's native unit) but
+        Preset temperatures and safety limits are stored in °C (the entity's native unit) but
         shown and entered in the HA system unit, converted at this boundary.
         """
         unit = self.hass.config.units.temperature_unit
@@ -171,7 +182,7 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
 
         if user_input is not None:
             data = dict(user_input)
-            for key in _PRESET_TEMP_KEYS:
+            for key in (*_PRESET_TEMP_KEYS, *_SAFETY_KEYS):
                 if key in data:
                     data[key] = _from_display(data[key], unit)
             # Checked in °C after conversion; the epsilon absorbs the
@@ -179,6 +190,12 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
             for low_key, high_key in _PRESET_RANGE_KEYS:
                 if data[high_key] - data[low_key] < MIN_TEMP_DIFF - 0.01:
                     errors[high_key] = "range_too_narrow"
+            if (
+                CONF_SAFETY_MIN in data
+                and CONF_SAFETY_MAX in data
+                and data[CONF_SAFETY_MIN] >= data[CONF_SAFETY_MAX]
+            ):
+                errors[CONF_SAFETY_MAX] = "safety_limits_inverted"
             if not errors:
                 return self.async_create_entry(title="", data=data)
 
@@ -223,8 +240,24 @@ class ComfortThermostatOptionsFlow(OptionsFlow):
             ): temp_selector
             for key in _PRESET_TEMP_KEYS
         }
+        # Safety limits reach below / above any comfort setpoint, so they
+        # get the wider plausible-reading bounds.
+        safety_selector = _temp_selector(
+            unit, INSIDE_TEMP_PLAUSIBLE_MIN, INSIDE_TEMP_PLAUSIBLE_MAX
+        )
+        safety_defaults = {
+            CONF_SAFETY_MIN: DEFAULT_SAFETY_MIN,
+            CONF_SAFETY_MAX: DEFAULT_SAFETY_MAX,
+        }
+        safety_schema = {
+            vol.Required(
+                key,
+                default=_to_display(current.get(key, safety_defaults[key]), unit),
+            ): safety_selector
+            for key in _SAFETY_KEYS
+        }
 
-        schema = vol.Schema({**sensor_schema, **preset_schema})
+        schema = vol.Schema({**sensor_schema, **preset_schema, **safety_schema})
         if errors:
             # Re-show what the user typed, not the stored values.
             schema = self.add_suggested_values_to_schema(schema, user_input)

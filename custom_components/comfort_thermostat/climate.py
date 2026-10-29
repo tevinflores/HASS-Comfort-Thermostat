@@ -55,6 +55,8 @@ from .const import (
     CONF_INSIDE_SENSOR_AWAY,
     CONF_INSIDE_SENSOR_SLEEP,
     CONF_OUTSIDE_SENSOR,
+    CONF_SAFETY_MAX,
+    CONF_SAFETY_MIN,
     CONF_REAL_CLIMATE,
     CONF_SLEEP_MAX,
     CONF_SLEEP_MIN,
@@ -63,6 +65,8 @@ from .const import (
     DEFAULT_AWAY_MIN,
     DEFAULT_HOME_MAX,
     DEFAULT_HOME_MIN,
+    DEFAULT_SAFETY_MAX,
+    DEFAULT_SAFETY_MIN,
     DEFAULT_SLEEP_MAX,
     DEFAULT_SLEEP_MIN,
     FAST_FLIP_CONFIRM,
@@ -216,6 +220,10 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
                 config.get(CONF_AWAY_MAX, DEFAULT_AWAY_MAX),
             ),
         }
+        # Freeze / overheat limits (°C), checked in every mode (#12).
+        self._safety_min: float = config.get(CONF_SAFETY_MIN, DEFAULT_SAFETY_MIN)
+        self._safety_max: float = config.get(CONF_SAFETY_MAX, DEFAULT_SAFETY_MAX)
+
         # Entries saved before #6 could hold bands as narrow as 0.5 °C,
         # which park the room above the band (see MIN_TEMP_DIFF).  Widen
         # them here; the options flow rejects them on the next edit.
@@ -1014,6 +1022,15 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             wait = self._min_off_wait()
             if wait > 0:
                 problems.append(f"min_off_time_wait:{math.ceil(wait)}s")
+
+        # Freeze / overheat, in every mode (#12): out_of_band only covers
+        # AUTO, so a house left OFF would otherwise go unwatched.
+        inside = self._current_temperature
+        if inside is not None:
+            if inside < self._safety_min:
+                problems.append("below_safety_min")
+            elif inside > self._safety_max:
+                problems.append("above_safety_max")
 
         # Sustained out-of-band in AUTO.  AUTO that can't keep the room
         # in band over half-hour windows means the unit is undersized,
