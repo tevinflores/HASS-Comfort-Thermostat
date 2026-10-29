@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.2.1...v1.3.0) (2026-10-29)
+
+
+### Features
+
+* **climate:** freeze and overheat alerts in every mode ([02bd6a0](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/02bd6a026f616eaa1a7def182899b1b3534f3372)), closes [#12](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/12)
+* **climate:** pause in OFF when switching between heat and cool ([cfb822a](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/cfb822a1cca940ceae19464bb941be2c5c1d43a9)), closes [#11](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/11)
+
 ## [1.2.1](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.2.0...v1.2.1) (2026-10-29)
 
 
