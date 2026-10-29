@@ -66,7 +66,8 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   - User setup flow
   - Options flow for preset temperatures **and** the per-preset inside
     sensors (since #81) — so existing installs can wire up Sleep / Away
-    zones without deleting and re-adding the integration
+    zones without deleting and re-adding the integration, and the
+    freeze / overheat safety limits (#12)
   
 - **`custom_components/comfort_thermostat/const.py`**: Constants and defaults
   - Preset temperature ranges
@@ -609,11 +610,14 @@ Conditions checked:
 | `auto_waiting_for_reading` | AUTO has no inside reading and no committed direction, so the device is left untouched (#5) | immediate |
 | `min_off_time_wait:Ns` | A HEAT/COOL is held back for N more seconds by `MIN_OFF_TIME` after an OFF (#31) | immediate |
 | `out_of_band:Nmin` | AUTO can't keep room in band | `OUT_OF_BAND_ALERT_MINUTES` (30) |
+| `below_safety_min` / `above_safety_max` | Inside reading past the freeze / overheat limit, in **any** mode including OFF (#12) | immediate; limits `safety_min` / `safety_max` in Options (default 7 / 32 °C) |
 | `short_cycle:N/h` | Real compressor starts (heat or cool) per hour too high (#8) | `SHORT_CYCLE_THRESHOLD_PER_H` (6) |
 | `command_desync:want=X_got=Y` | Wrapper commanded `X` but real device is in `Y` past `COMMAND_GRACE_SECONDS` (60) | 60 s |
 
 `out_of_band` only fires in AUTO (manual modes are on the user's
-terms).  `short_cycle` count is a rolling 1-hour window of the real
+terms); the safety limits cover every mode, so a house left OFF isn't
+unwatched.  They only alert: the wrapper never turns the unit on by
+itself.  `short_cycle` count is a rolling 1-hour window of the real
 device's `hvac_action` going into `heating` or `cooling` from a
 stopped action, tracked in `_on_real_climate_update`.  Defrost and dry
 count as running, so a defrost cycle isn't a start.  The wrapper's own

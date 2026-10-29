@@ -29,7 +29,11 @@ from custom_components.comfort_thermostat.const import (
     CONF_INSIDE_SENSOR_AWAY,
     CONF_INSIDE_SENSOR_SLEEP,
     CONF_OUTSIDE_SENSOR,
+    CONF_SAFETY_MAX,
+    CONF_SAFETY_MIN,
     DEFAULT_HOME_MIN,
+    DEFAULT_SAFETY_MAX,
+    DEFAULT_SAFETY_MIN,
     DEFAULT_HOME_MAX,
     DEFAULT_SLEEP_MIN,
     DEFAULT_SLEEP_MAX,
@@ -3773,3 +3777,50 @@ class TestChangeoverPause(_OffHoldHarness):
 
         hass.services.async_call.assert_not_called()
         assert call_later.call_args.args[1] == MIN_OFF_TIME - 30 - OFF_SETTLE
+
+
+class TestSafetyLimits:
+    """The inside reading is checked against safety limits in every mode,
+    so a house left OFF can't freeze or overheat unnoticed (#12)."""
+
+    def _entity(self, inside, mode=HVACMode.OFF, config=None):
+        hass = _make_hass_mock(inside_temp=inside)
+        entity = _make_entity(hass, config)
+        entity._hvac_mode = mode
+        entity._current_temperature = inside
+        return entity
+
+    def _safety(self, entity):
+        return [p for p in entity._detect_problems() if "safety" in p]
+
+    def test_below_min_while_off(self):
+        entity = self._entity(DEFAULT_SAFETY_MIN - 0.1)
+        assert self._safety(entity) == ["below_safety_min"]
+
+    def test_above_max_while_off(self):
+        entity = self._entity(DEFAULT_SAFETY_MAX + 0.1)
+        assert self._safety(entity) == ["above_safety_max"]
+
+    def test_within_limits(self):
+        assert self._safety(self._entity(DEFAULT_SAFETY_MIN)) == []
+        assert self._safety(self._entity(DEFAULT_SAFETY_MAX)) == []
+
+    @pytest.mark.parametrize("mode", [HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO])
+    def test_checked_in_every_mode(self, mode):
+        entity = self._entity(DEFAULT_SAFETY_MIN - 1, mode=mode)
+        assert self._safety(entity) == ["below_safety_min"]
+
+    def test_no_reading_no_alert(self):
+        entity = self._entity(None)
+        assert self._safety(entity) == []
+
+    def test_configured_limits(self):
+        config = {
+            CONF_REAL_CLIMATE: REAL_CLIMATE_ID,
+            CONF_INSIDE_SENSOR: INSIDE_SENSOR_ID,
+            CONF_SAFETY_MIN: 15.0,
+            CONF_SAFETY_MAX: 28.0,
+        }
+        assert self._safety(self._entity(14.9, config=config)) == ["below_safety_min"]
+        assert self._safety(self._entity(28.1, config=config)) == ["above_safety_max"]
+        assert self._safety(self._entity(20.0, config=config)) == []

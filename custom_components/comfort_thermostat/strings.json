@@ -25,7 +25,7 @@
     "step": {
       "init": {
         "title": "Comfort Thermostat Options",
-        "description": "Configure the per-preset temperature sensors and comfort temperature ranges.",
+        "description": "Configure the per-preset temperature sensors, comfort temperature ranges, and safety limits. The safety limits are checked in every mode, including OFF, and reported in the thermostat's `problems` attribute.",
         "data": {
           "inside_sensor": "Inside Temperature Sensor (Home / default)",
           "inside_sensor_sleep": "Inside Temperature Sensor – Sleep (optional)",
@@ -36,12 +36,15 @@
           "sleep_min": "Sleep – Low Setpoint",
           "sleep_max": "Sleep – High Setpoint",
           "away_min": "Away – Low Setpoint",
-          "away_max": "Away – High Setpoint"
+          "away_max": "Away – High Setpoint",
+          "safety_min": "Safety – Too Cold Below",
+          "safety_max": "Safety – Too Hot Above"
         }
       }
     },
     "error": {
-      "range_too_narrow": "The high setpoint must be at least {min_diff} above the low setpoint."
+      "range_too_narrow": "The high setpoint must be at least {min_diff} above the low setpoint.",
+      "safety_limits_inverted": "The too-hot limit must be above the too-cold limit."
     }
   }
 }
