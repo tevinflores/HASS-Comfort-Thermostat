@@ -40,6 +40,8 @@ from custom_components.comfort_thermostat.const import (
     FLIP_MARGIN,
     INSIDE_TEMP_PLAUSIBLE_MAX,
     INSIDE_TEMP_PLAUSIBLE_MIN,
+    COMMAND_GRACE_SECONDS,
+    MAX_DRIFT_RESENDS,
     MAX_TEMP,
     MIN_CHANGEOVER_INTERVAL,
     MIN_TEMP,
@@ -3039,3 +3041,320 @@ class TestFahrenheitDeviceRounding:
             entity._auto_mode = direction
             await entity._async_sync_real_climate()
             assert hass.services.async_call.call_args[0][2]["temperature"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Unit tests – re-send commands when the device drifts (issue #8)
+# ---------------------------------------------------------------------------
+
+class TestResendOnDrift:
+    """When the real device stops matching what the wrapper commanded (power
+    blip, IR remote, a dropped command), the wrapper re-sends — after
+    COMMAND_GRACE_SECONDS for drift, immediately when the device comes back
+    from unavailable — at most MAX_DRIFT_RESENDS times in a row.  A mode
+    someone else switched the device to is left running for
+    MIN_CHANGEOVER_INTERVAL first, so undoing it can't short-cycle."""
+
+    CALL_LATER = "custom_components.comfort_thermostat.climate.async_call_later"
+
+    async def _entity(self, mode=HVACMode.HEAT, target=22.0, device_state="heat", device_temp=22.0):
+        hass = _make_hass_mock()
+        device = {"state": device_state, "temperature": device_temp}
+
+        def _get(entity_id):
+            if entity_id != REAL_CLIMATE_ID:
+                return None
+            state = MagicMock()
+            state.state = device["state"]
+            state.attributes = {"hvac_action": None, "temperature": device["temperature"]}
+            return state
+
+        hass.states.get = _get
+        entity = _make_entity(hass)
+        entity._hvac_mode = mode
+        entity._target_temperature = target
+        entity.async_write_ha_state = MagicMock()
+        entity._now, self.advance = _fake_clock()
+        entity._sync_from_real_climate()
+        await entity._async_sync_real_climate()
+        hass.services.async_call.reset_mock()
+        return entity, hass, device
+
+    def _event(self, entity, call_later_return=None):
+        """Deliver a real-device state event; return the async_call_later mock."""
+        with patch(self.CALL_LATER, return_value=call_later_return or MagicMock()) as call_later:
+            entity._on_real_climate_update()
+        return call_later
+
+    async def _fire(self, entity, hass, call_later):
+        """Advance to the scheduled re-check, run it and the sync it creates.
+
+        Returns the async_call_later mock for a re-check it schedules."""
+        hass.async_create_task.reset_mock()
+        self.advance(call_later.call_args.args[1])
+        with patch(self.CALL_LATER, return_value=MagicMock()) as again:
+            call_later.call_args.args[2](None)
+        if hass.async_create_task.called:
+            await hass.async_create_task.call_args.args[0]
+        return again
+
+    @pytest.mark.asyncio
+    async def test_in_sync_event_schedules_nothing(self):
+        entity, hass, device = await self._entity()
+        assert not self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_dropped_command_rechecked_after_grace(self):
+        """The device never took the command, so re-sending it costs no
+        extra compressor cycle."""
+        entity, hass, device = await self._entity(device_state="cool")
+
+        call_later = self._event(entity)
+
+        call_later.assert_called_once()
+        assert call_later.call_args.args[1] == COMMAND_GRACE_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_remote_mode_change_runs_min_interval_before_undo(self):
+        """The device took the command, then the remote changed its mode:
+        undoing that after a minute would short-cycle the unit."""
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"  # IR remote
+
+        call_later = self._event(entity)
+
+        call_later.assert_called_once()
+        assert call_later.call_args.args[1] == MIN_CHANGEOVER_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_remote_on_while_off_runs_min_interval_before_off(self):
+        entity, hass, device = await self._entity(mode=HVACMode.OFF, device_state="off")
+        device["state"] = "cool"
+
+        call_later = self._event(entity)
+
+        assert call_later.call_args.args[1] == MIN_CHANGEOVER_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_setpoint_only_drift_rechecked_after_grace(self):
+        entity, hass, device = await self._entity()
+        device["temperature"] = 25.0
+
+        assert self._event(entity).call_args.args[1] == COMMAND_GRACE_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_sync_does_not_undo_remote_mode_early(self):
+        """A sensor reading re-runs the sync; it must wait like the
+        re-check does."""
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        self._event(entity)
+        self.advance(MIN_CHANGEOVER_INTERVAL - 60)
+
+        await entity._async_sync_real_climate()
+        hass.services.async_call.assert_not_called()
+
+        self.advance(60)
+        await entity._async_sync_real_climate()
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "heat"
+
+    @pytest.mark.asyncio
+    async def test_user_change_is_not_held_back(self):
+        """The wait protects against the wrapper's automatic re-sends, not
+        against the user's own change in the thermostat."""
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        self._event(entity)
+
+        await entity.async_set_hvac_mode(HVACMode.HEAT)
+
+        assert hass.services.async_call.call_args.args[2]["hvac_mode"] == "heat"
+
+    @pytest.mark.asyncio
+    async def test_new_remote_mode_restarts_the_wait(self):
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        call_later = self._event(entity)
+        self.advance(MIN_CHANGEOVER_INTERVAL - 300)
+        device["state"] = "fan_only"
+        self._event(entity)
+        self.advance(300)  # the original re-check comes due
+
+        with patch(self.CALL_LATER, return_value=MagicMock()) as again:
+            call_later.call_args.args[2](None)
+
+        hass.async_create_task.assert_not_called()
+        assert again.call_args.args[1] == MIN_CHANGEOVER_INTERVAL - 300
+
+    @pytest.mark.asyncio
+    async def test_remote_fight_cannot_short_cycle(self):
+        """Something that keeps switching the unit back by remote gets at
+        most one undo per MIN_CHANGEOVER_INTERVAL, retry-count resets
+        or not."""
+        entity, hass, device = await self._entity()
+        resend_times = []
+        for _ in range(MAX_DRIFT_RESENDS + 3):
+            device["state"] = "cool"
+            call_later = self._event(entity)
+            hass.services.async_call.reset_mock()
+            await self._fire(entity, hass, call_later)
+            assert hass.services.async_call.called
+            resend_times.append(entity._now())
+            device["state"] = "heat"
+            self._event(entity)
+
+        gaps = [(b - a).total_seconds() for a, b in zip(resend_times, resend_times[1:])]
+        assert min(gaps) >= MIN_CHANGEOVER_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_recheck_resends_mode_and_setpoint(self):
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        call_later = self._event(entity)
+
+        await self._fire(entity, hass, call_later)
+
+        data = hass.services.async_call.call_args.args[2]
+        assert data["hvac_mode"] == "heat"
+        assert data["temperature"] == 22
+
+    @pytest.mark.asyncio
+    async def test_setpoint_drift_is_resent(self):
+        entity, hass, device = await self._entity()
+        device["temperature"] = 25.0  # someone nudged it on the unit
+
+        call_later = self._event(entity)
+        await self._fire(entity, hass, call_later)
+
+        assert hass.services.async_call.call_args.args[2]["temperature"] == 22
+
+    @pytest.mark.asyncio
+    async def test_drift_that_clears_within_grace_is_not_resent(self):
+        entity, hass, device = await self._entity()
+        cancel = MagicMock()
+        device["state"] = "cool"
+        self._event(entity, call_later_return=cancel)
+
+        device["state"] = "heat"
+        call_later = self._event(entity)
+
+        cancel.assert_called_once()
+        assert not call_later.called
+
+    @pytest.mark.asyncio
+    async def test_repeated_drift_events_keep_one_recheck(self):
+        """Events during the grace window must not push the re-check out."""
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        self._event(entity)
+
+        device["temperature"] = 25.0
+        assert not self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_off_is_enforced_too(self):
+        """Wrapper OFF, unit turned on by the remote: turn it back off."""
+        entity, hass, device = await self._entity(mode=HVACMode.OFF, device_state="off")
+        device["state"] = "cool"
+
+        call_later = self._event(entity)
+        await self._fire(entity, hass, call_later)
+
+        data = hass.services.async_call.call_args.args[2]
+        assert hass.services.async_call.call_args.args[1] == "set_hvac_mode"
+        assert data["hvac_mode"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_retries_are_limited(self):
+        """A device that refuses a mode is not spammed; command_desync
+        stays in problems."""
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        resends = 0
+        for _ in range(MAX_DRIFT_RESENDS + 2):
+            call_later = self._event(entity)
+            if not call_later.called:
+                break
+            hass.services.async_call.reset_mock()
+            await self._fire(entity, hass, call_later)
+            resends += hass.services.async_call.called
+
+        assert resends == MAX_DRIFT_RESENDS
+
+    @pytest.mark.asyncio
+    async def test_retry_count_resets_once_device_matches(self):
+        entity, hass, device = await self._entity()
+        for _ in range(MAX_DRIFT_RESENDS):
+            device["state"] = "cool"
+            await self._fire(entity, hass, self._event(entity))
+            device["state"] = "heat"
+            self._event(entity)
+
+        device["state"] = "cool"
+        assert self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_new_command_resets_retry_count(self):
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        for _ in range(MAX_DRIFT_RESENDS):
+            await self._fire(entity, hass, self._event(entity))
+        assert not self._event(entity).called  # exhausted
+
+        await entity.async_set_hvac_mode(HVACMode.COOL)
+        device["state"] = "heat"
+        assert self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_return_from_unavailable_resyncs_immediately(self):
+        """After a power blip the unit comes back in its own default state."""
+        entity, hass, device = await self._entity()
+        device["state"] = "unavailable"
+        assert not self._event(entity).called
+
+        device["state"], device["temperature"] = "off", 24.0
+        hass.async_create_task.reset_mock()
+        call_later = self._event(entity)
+
+        assert not call_later.called
+        await hass.async_create_task.call_args.args[0]
+        data = hass.services.async_call.call_args.args[2]
+        assert (data["hvac_mode"], data["temperature"]) == ("heat", 22)
+
+    @pytest.mark.asyncio
+    async def test_nothing_enforced_before_first_command(self):
+        hass = _make_hass_mock(real_climate_state="cool")
+        entity = _make_entity(hass)
+        entity.async_write_ha_state = MagicMock()
+        assert not self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_card_setpoint_is_not_seen_as_drift(self):
+        entity, hass, device = await self._entity()
+        await entity.async_set_temperature(temperature=23.0)
+        device["temperature"] = 23.0
+
+        assert not self._event(entity).called
+
+    @pytest.mark.asyncio
+    async def test_no_recheck_while_control_call_in_flight(self):
+        entity, hass, device = await self._entity()
+        device["state"] = "cool"
+        call_later = self._event(entity)
+        entity._updating_from_control = True
+        hass.async_create_task.reset_mock()
+
+        call_later.call_args.args[2](None)
+
+        hass.async_create_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_removal_cancels_pending_recheck(self):
+        entity, hass, device = await self._entity()
+        cancel = MagicMock()
+        device["state"] = "cool"
+        self._event(entity, call_later_return=cancel)
+
+        await entity.async_will_remove_from_hass()
+
+        cancel.assert_called_once()

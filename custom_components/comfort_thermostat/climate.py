@@ -70,6 +70,7 @@ from .const import (
     FLIP_MARGIN,
     INSIDE_TEMP_PLAUSIBLE_MAX,
     INSIDE_TEMP_PLAUSIBLE_MIN,
+    MAX_DRIFT_RESENDS,
     MAX_TEMP,
     MIN_CHANGEOVER_INTERVAL,
     MIN_TEMP,
@@ -265,6 +266,27 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # transition into the commanded state.  Don't update this on
         # every sync — only when the command itself changes.
         self._unit_command_at: datetime.datetime | None = None
+
+        # Setpoint (in the device's unit) sent with `_unit_command`; None
+        # for OFF.  Together they are what the real device should show.
+        self._unit_setpoint: float | None = None
+
+        # Drift re-send (#8): a pending re-check while the real device
+        # doesn't match `_unit_command` / `_unit_setpoint`, how many
+        # re-sends in a row it has taken, and whether the device was
+        # available at the last event (to catch it coming back).
+        self._drift_recheck_unsub: CALLBACK_TYPE | None = None
+        self._drift_resends: int = 0
+        self._real_available: bool = False
+
+        # Whether the real device has shown `_unit_command` since it was
+        # sent.  A mode change after that came from someone else (IR
+        # remote); `_foreign_mode` is that mode and `_foreign_since` when
+        # it started.  It is only undone once it has run for
+        # MIN_CHANGEOVER_INTERVAL, so undoing it can't short-cycle the unit.
+        self._device_matched: bool = False
+        self._foreign_mode: str | None = None
+        self._foreign_since: datetime.datetime | None = None
 
         # Problem-detection state (surfaced via `problems` attribute).
         # Updated by sensor / sync callbacks; checked at attribute read.
@@ -477,8 +499,9 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         )
 
     async def async_will_remove_from_hass(self) -> None:
-        """Cancel a pending fast-flip re-check so it can't fire after removal."""
+        """Cancel pending re-checks so they can't fire after removal."""
         self._cancel_flip_recheck()
+        self._cancel_drift_recheck()
         await super().async_will_remove_from_hass()
 
     def _restore_from_state(self, last_state: State) -> None:
@@ -627,7 +650,8 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
     def _sync_from_real_climate(self) -> None:
         """Pull current state from the real climate entity at startup."""
         state = self.hass.states.get(self._real_climate_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        self._real_available = self._is_available(state)
+        if not self._real_available:
             return
         action = state.attributes.get("hvac_action")
         if action:
@@ -684,16 +708,24 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
 
     @callback
     def _on_real_climate_update(self) -> None:
-        """Mirror the real device's hvac_action for UI display.
+        """Mirror the real device's hvac_action and correct drift.
 
         Comfort Thermostat is the authoritative source of truth for mode, preset,
         and setpoints – see the master/slave note at the top of this class.
-        Real-device state-change events are used only to surface the current
-        action (heating / cooling / idle / off) in the frontend.
+        Real-device state-change events never feed back into that state:
+        they surface the current action (heating / cooling / idle / off) in
+        the frontend, and re-send our command when the device stops
+        matching it (#8).
         """
         state = self.hass.states.get(self._real_climate_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        available = self._is_available(state)
+        came_back = available and not self._real_available
+        self._real_available = available
+        if not available:
+            self._cancel_drift_recheck()
             return
+
+        self._check_drift(state, came_back)
 
         action_str = state.attributes.get("hvac_action")
         if not action_str:
@@ -1167,6 +1199,118 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             self.hass.async_create_task(self._async_sync_real_climate())
 
     # ------------------------------------------------------------------
+    # Drift correction (#8)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_available(state: State | None) -> bool:
+        return state is not None and state.state not in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+            None,
+            "",
+        )
+
+    def _device_drifted(self, state: State) -> bool:
+        """Return True when the real device doesn't show our last command."""
+        if state.state != self._unit_command.value:
+            return True
+        if self._unit_setpoint is None:
+            return False
+        try:
+            current = float(state.attributes.get("temperature"))
+        except (TypeError, ValueError):
+            return False
+        return abs(current - self._unit_setpoint) >= 0.5
+
+    def _check_drift(self, state: State, came_back: bool) -> None:
+        """Re-send our command when the real device stops matching it.
+
+        A device returning from unavailable (power blip) comes back in its
+        own default state, so it is re-synced at once.  Any other mismatch
+        gets COMMAND_GRACE_SECONDS to settle first — events from a command
+        we just sent arrive mid-transition — and is re-sent only if it
+        persists, at most MAX_DRIFT_RESENDS times in a row.  A mode someone
+        else switched the device to after it had matched our command is
+        left running for MIN_CHANGEOVER_INTERVAL first, so a remote can't
+        make the wrapper short-cycle the unit.  Nothing is enforced before
+        the wrapper has commanded anything.
+        """
+        if self._unit_command is None:
+            return
+        if came_back:
+            self._cancel_drift_recheck()
+            self._drift_resends = 0
+            self._device_matched = False
+            self._foreign_mode = None
+            if not self._updating_from_control:
+                self.hass.async_create_task(self._async_sync_real_climate())
+            return
+        if state.state == self._unit_command.value:
+            self._device_matched = True
+            self._foreign_mode = None
+        elif self._device_matched and state.state != self._foreign_mode:
+            self._foreign_mode = state.state
+            self._foreign_since = self._now()
+        if not self._device_drifted(state):
+            self._cancel_drift_recheck()
+            self._drift_resends = 0
+            return
+        # Keep an already-pending re-check rather than pushing it out on
+        # every event of the grace window; it re-reads the wait when it runs.
+        if (
+            self._drift_recheck_unsub is None
+            and self._drift_resends < MAX_DRIFT_RESENDS
+        ):
+            self._drift_recheck_unsub = async_call_later(
+                self.hass,
+                max(COMMAND_GRACE_SECONDS, self._foreign_mode_wait()),
+                self._async_drift_recheck,
+            )
+
+    def _foreign_mode_wait(self) -> float:
+        """Seconds until a mode someone else set may be undone."""
+        if self._foreign_mode is None or self._foreign_since is None:
+            return 0.0
+        elapsed = (self._now() - self._foreign_since).total_seconds()
+        return max(0.0, MIN_CHANGEOVER_INTERVAL - elapsed)
+
+    def _cancel_drift_recheck(self) -> None:
+        if self._drift_recheck_unsub is not None:
+            self._drift_recheck_unsub()
+            self._drift_recheck_unsub = None
+
+    @callback
+    def _async_drift_recheck(self, _now: datetime.datetime | None) -> None:
+        self._drift_recheck_unsub = None
+        if self._updating_from_control or self._unit_command is None:
+            return
+        state = self.hass.states.get(self._real_climate_id)
+        if not self._is_available(state) or not self._device_drifted(state):
+            return
+        wait = self._foreign_mode_wait()
+        if wait > 0:
+            # The device changed mode again during the wait.
+            self._drift_recheck_unsub = async_call_later(
+                self.hass, wait, self._async_drift_recheck
+            )
+            return
+        self._drift_resends += 1
+        if self._drift_resends == MAX_DRIFT_RESENDS:
+            _LOGGER.warning(
+                "%s: %s still shows %s / %s after %d re-sends of %s / %s; "
+                "giving up until it matches or the command changes",
+                self.name,
+                self._real_climate_id,
+                state.state,
+                state.attributes.get("temperature"),
+                MAX_DRIFT_RESENDS,
+                self._unit_command.value,
+                self._unit_setpoint,
+            )
+        self.hass.async_create_task(self._async_sync_real_climate())
+
+    # ------------------------------------------------------------------
     # Real-climate synchronisation
     # ------------------------------------------------------------------
 
@@ -1194,8 +1338,12 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # Track command changes for desync detection (only when the
         # command actually changes — re-issuing the same command
         # shouldn't reset the grace window).
-        if real_mode != self._unit_command:
+        command_changed = real_mode != self._unit_command
+        if command_changed:
             self._unit_command_at = self._now()
+            self._drift_resends = 0
+            self._device_matched = False
+            self._foreign_mode = None
         # Record the wrapper's intent so hvac_action can surface IDLE for
         # deliberate-OFF (AUTO + OFF inside the comfort band) without
         # re-running _desired_real_mode (which has timer side-effects).
@@ -1206,6 +1354,19 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             return
 
         current_mode = real_state.state
+        if current_mode == real_mode.value:
+            self._device_matched = True
+        elif (
+            not command_changed
+            and not self._updating_from_control
+            and current_mode == self._foreign_mode
+            and self._foreign_mode_wait() > 0
+        ):
+            # Someone else switched the device to this mode; the drift
+            # re-check undoes it once it has run long enough.  A sensor
+            # reading must not undo it sooner.  The user's own changes
+            # (control methods) still go through.
+            return
 
         # OFF reaches here in two cases now: (a) the user commanded smart
         # climate OFF, and (b) AUTO is in deliberate-OFF — the wrapper
@@ -1214,6 +1375,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
         # Forward the OFF; only send the command if the real device isn't
         # already off.
         if real_mode == HVACMode.OFF:
+            self._unit_setpoint = None
             if current_mode != HVACMode.OFF.value:
                 await self.hass.services.async_call(
                     "climate",
@@ -1274,6 +1436,7 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             target_temp = self._target_temperature
 
         setpoint = self._device_setpoint(target_temp, real_mode, low, high)
+        self._unit_setpoint = setpoint
 
         # The real device's attributes and its set_temperature service both
         # use the system unit, as does ``setpoint``.
@@ -1414,12 +1577,16 @@ class ComfortThermostatEntity(ClimateEntity, RestoreEntity):
             elif ATTR_TEMPERATURE in kwargs:
                 temp = float(kwargs[ATTR_TEMPERATURE])
                 self._target_temperature = temp
+                setpoint = self._device_setpoint(temp, self._hvac_mode)
+                if self._hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+                    # So drift correction (#8) expects the new value.
+                    self._unit_setpoint = setpoint
                 await self.hass.services.async_call(
                     "climate",
                     "set_temperature",
                     {
                         "entity_id": self._real_climate_id,
-                        "temperature": self._device_setpoint(temp, self._hvac_mode),
+                        "temperature": setpoint,
                     },
                     blocking=False,
                 )
