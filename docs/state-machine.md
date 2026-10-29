@@ -123,6 +123,8 @@ Per sensor tick:
    FLIP_MARGIN` deviation; flip `_auto_mode` if sustained for 30 min
    (subject to `MIN_CHANGEOVER_INTERVAL`).
 4. **Unit command**: the committed direction with its band-edge setpoint.
+   If the device is running the opposite mode, it is turned OFF first
+   and the new mode follows after `OFF_SETTLE` (60 s).
 5. **Send to device**: only call `set_temperature` when the unit's
    reported mode or setpoint differs from the desired one.
 
@@ -168,6 +170,7 @@ All thresholds live in [`const.py`](../custom_components/comfort_thermostat/cons
 | `FAST_FLIP_CONFIRM` | 180 s (3 min) | How long a band-edge violation must hold before fast-flip |
 | `MIN_CHANGEOVER_INTERVAL` | 600 s (10 min) | Minimum spacing between AUTO changeovers; also how long a remote-set mode runs before it's undone |
 | `MIN_OFF_TIME` | 300 s (5 min) | After the thermostat turns the unit OFF, how long before HEAT/COOL can start it again |
+| `OFF_SETTLE` | 60 s | How long a HEAT↔COOL changeover stops the unit before starting the new mode |
 | `MIN_TEMP_DIFF` | 1.5 °C | Narrowest allowed comfort band |
 | `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` | 0 / 45 °C | Inside readings outside this range count as no reading |
 | `COMMAND_GRACE_SECONDS` | 60 | Time for the device to follow a command before desync / re-send |

@@ -137,6 +137,15 @@ All tests are in `tests/` and must be kept in sync with implementation changes.
   `_unit_command` stays OFF while held, so desync and drift correction
   keep expecting OFF.  All OFFs go through `_async_sync_real_climate`;
   sending one directly used to leave `_unit_command` stale.
+- `OFF_SETTLE` (60 s): HEAT↔COOL goes through OFF for this long, so the
+  compressor spins down and pressures equalise before the reversing valve
+  changes (#11).  Applies to AUTO flips and the user's own changes alike,
+  keyed on the *device* running the opposite mode (so it also holds after
+  a restart, and is skipped if the device is already off).  It reuses the
+  `MIN_OFF_TIME` hold with `_off_hold = OFF_SETTLE`, and isn't reported in
+  `problems`.  A user OFF during the pause gets the full `MIN_OFF_TIME`.
+  Undoing a remote's mode change (drift correction) doesn't pause: the
+  10-minute wait already protects the unit there.
 - `INSIDE_TEMP_PLAUSIBLE_MIN` / `_MAX` (0–45 °C): inside readings
   outside this range count as no reading (#3).
 
@@ -566,8 +575,8 @@ Direction commitment changes on two timelines, by severity:
 Both flips are spaced by **`MIN_CHANGEOVER_INTERVAL`** (10 min) from
 the previous AUTO changeover, so the wrapper can't ping-pong the
 reversing valve.  The initial pick doesn't count as a changeover, and
-the user's explicit HEAT↔COOL mode changes are not blocked (the pause
-for those is #11).  `_last_changeover_at` is not persisted.
+the user's explicit HEAT↔COOL mode changes are not blocked (they only
+get the `OFF_SETTLE` pause, #11).  `_last_changeover_at` is not persisted.
 
 Live regression 2026-04-26: with HEAT committed (from a stale
 state surviving an integration reload that pre-dated the v3.0.2
@@ -658,25 +667,13 @@ a room that was actually at 22.7 °C.  Persisted state means we keep
 the previously-correct commitment instead of guessing again.
 
 `_pending_flip_since`, `_fast_flip_since`, `_last_changeover_at`,
-`_off_since`, `_out_of_band_since`, and `_compressor_starts` are *not*
+`_off_since` / `_off_hold`, `_out_of_band_since`, and `_compressor_starts` are *not*
 persisted — they re-arm naturally from sensor data and the worst-case
 latency on each is acceptable (`FLIP_DWELL` 30 min, `FAST_FLIP_CONFIRM`
 3 min, `OUT_OF_BAND_ALERT_MINUTES` 30 min, short-cycle 1 h window).
 Losing `_last_changeover_at` only means the first changeover after a
 restart isn't spaced from the last one before it; losing `_off_since`
 means a restart isn't held after an OFF from before the restart.
-
-## Future Work — Mode-flip transition OFF (not implemented)
-
-When AUTO commits a HEAT↔COOL flip (FLIP_DWELL met), emit
-`old_mode → off → wait OFF_SETTLE → new_mode` (default 60 s).  Lets the
-compressor spin down, the reversing valve stabilise, and refrigerant
-pressures equalise before the new mode kicks in.  At most ~1–2 flips/day
-in normal use, so an extra startup costs nothing measurable.
-
-This is the one deliberate-OFF-adjacent idea that survived the v5.0.0
-retraction, because it is about *transitions* rather than steady-state
-cycling — the thing the 2026-05-02 power data actually indicted.
 
 ## Future Work — Fan time percentage (Ecobee-style)
 
