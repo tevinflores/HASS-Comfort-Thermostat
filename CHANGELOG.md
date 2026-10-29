@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.3](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.2...v1.1.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **climate:** let a remote mode change run before undoing it ([b8f2e31](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/b8f2e3197a0b3d3769b203da52af0f93387cef74))
+* **climate:** re-send commands when the real device drifts ([f9f2124](https://github.com/tevinflores/HASS-Comfort-Thermostat/commit/f9f2124b121ffcf3e6c7b8ff1f21b6b4d3564890)), closes [#8](https://github.com/tevinflores/HASS-Comfort-Thermostat/issues/8)
+
 ## [1.1.2](https://github.com/tevinflores/HASS-Comfort-Thermostat/compare/v1.1.1...v1.1.2) (2026-10-28)
 
 
